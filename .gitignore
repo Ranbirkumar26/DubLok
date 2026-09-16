@@ -1,0 +1,16 @@
+.env
+.venv/
+venv/
+__pycache__/
+**/__pycache__/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+node_modules/
+dist/
+frontend/dist/
+storage/
+*.pyc
+*.log
+*.tmp
+frontend/.vite/

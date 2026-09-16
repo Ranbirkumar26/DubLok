@@ -1,0 +1,33 @@
+services:
+  api:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    env_file: .env
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000
+    volumes:
+      - ./storage:/app/storage
+    ports:
+      - "8000:8000"
+
+  worker:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    env_file: .env
+    command: python -m app.worker
+    volumes:
+      - ./storage:/app/storage
+    depends_on:
+      - api
+
+  frontend:
+    build:
+      context: .
+      dockerfile: frontend/Dockerfile
+    environment:
+      VITE_API_BASE_URL: http://localhost:8000
+    ports:
+      - "5173:5173"
+    depends_on:
+      - api
