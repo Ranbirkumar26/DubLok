@@ -47,6 +47,7 @@ class Transcriber:
         )
 
     def _faster_whisper(self, audio_path: Path, language: str | None) -> dict:
+        self.settings.apply_model_environment()
         try:
             from faster_whisper import WhisperModel
         except ImportError as exc:

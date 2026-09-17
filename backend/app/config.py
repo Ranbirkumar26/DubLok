@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from functools import lru_cache
 from pathlib import Path
 from typing import Literal
@@ -45,6 +46,7 @@ class Settings(BaseSettings):
     device: Literal["auto", "cpu", "cuda"] = "auto"
     model_preset: Literal["fast", "balanced", "quality"] = "balanced"
     hf_home: Path = Path("./storage/models/huggingface")
+    hf_hub_disable_xet: str | None = "1"
     huggingface_hub_token: str | None = None
 
     background_mode: Literal["full_replacement", "preserve_background"] = (
@@ -71,6 +73,11 @@ class Settings(BaseSettings):
     @property
     def max_upload_bytes(self) -> int:
         return self.max_upload_mb * 1024 * 1024
+
+    def apply_model_environment(self) -> None:
+        os.environ.setdefault("HF_HOME", str(self.hf_home))
+        if self.hf_hub_disable_xet:
+            os.environ.setdefault("HF_HUB_DISABLE_XET", self.hf_hub_disable_xet)
 
 
 @lru_cache

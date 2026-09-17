@@ -35,6 +35,7 @@ class TTSEngine:
         voice: str | None,
         output_path: Path,
     ) -> None:
+        self.settings.apply_model_environment()
         try:
             import soundfile as sf
             import torch
@@ -51,19 +52,18 @@ class TTSEngine:
         prompt = f"{speaker} speaking {language_name} with natural conversational pacing."
         device = "cuda" if self.settings.device != "cpu" and torch.cuda.is_available() else "cpu"
         try:
+            model = ParlerTTSForConditionalGeneration.from_pretrained(
+                model_name,
+                token=self.settings.huggingface_hub_token or None,
+            ).to(device)
             tokenizer = AutoTokenizer.from_pretrained(
                 model_name,
                 token=self.settings.huggingface_hub_token or None,
             )
             description_tokenizer = AutoTokenizer.from_pretrained(
-                model_name,
-                subfolder="description_tokenizer",
+                model.config.text_encoder._name_or_path,
                 token=self.settings.huggingface_hub_token or None,
             )
-            model = ParlerTTSForConditionalGeneration.from_pretrained(
-                model_name,
-                token=self.settings.huggingface_hub_token or None,
-            ).to(device)
             inputs = description_tokenizer(prompt, return_tensors="pt").to(device)
             prompt_inputs = tokenizer(text, return_tensors="pt").to(device)
             with torch.no_grad():

@@ -216,7 +216,7 @@ def overlay_segments(
         mix_inputs.append(f"[{label}]")
     filters.append(
         f"{''.join(mix_inputs)}amix=inputs={len(segment_paths)}:duration=longest,"
-        f"atrim=0:{total_duration:.3f},asetpts=N/SR/TB[out]"
+        f"apad,atrim=0:{total_duration:.3f},asetpts=N/SR/TB[out]"
     )
     run_command(
         [
@@ -253,7 +253,7 @@ def mix_tracks(
                 "-i",
                 str(dubbed_path),
                 "-af",
-                f"volume={translated_volume:.4f},atrim=0:{duration:.3f}",
+                f"volume={translated_volume:.4f},apad,atrim=0:{duration:.3f},asetpts=N/SR/TB",
                 "-ar",
                 "44100",
                 "-ac",
@@ -273,8 +273,8 @@ def mix_tracks(
             str(dubbed_path),
             "-filter_complex",
             (
-                f"[0:a]volume={original_volume:.4f},atrim=0:{duration:.3f}[bg];"
-                f"[1:a]volume={translated_volume:.4f},atrim=0:{duration:.3f}[dub];"
+                f"[0:a]volume={original_volume:.4f},apad,atrim=0:{duration:.3f},asetpts=N/SR/TB[bg];"
+                f"[1:a]volume={translated_volume:.4f},apad,atrim=0:{duration:.3f},asetpts=N/SR/TB[dub];"
                 "[bg][dub]amix=inputs=2:duration=longest:normalize=0,"
                 f"atrim=0:{duration:.3f},asetpts=N/SR/TB[out]"
             ),
@@ -354,9 +354,9 @@ def verify_render_timing(
 ) -> None:
     final_audio_duration = audio_duration(final_audio_path)
     output_duration = audio_duration(output_video_path)
-    if final_audio_duration - source_duration > tolerance:
+    if abs(final_audio_duration - source_duration) > tolerance:
         raise ProcessingError(
-            "Generated audio is longer than the source video "
+            "Generated audio duration does not match the source video "
             f"({final_audio_duration:.2f}s vs {source_duration:.2f}s)."
         )
     if abs(output_duration - source_duration) > tolerance:

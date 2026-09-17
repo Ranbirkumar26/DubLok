@@ -66,6 +66,7 @@ class Translator:
         source_language: str,
         target_language: str,
     ) -> list[str]:
+        self.settings.apply_model_environment()
         try:
             import torch
             from transformers import AutoModelForSeq2SeqLM, AutoTokenizer

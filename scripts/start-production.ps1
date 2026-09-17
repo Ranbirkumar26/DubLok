@@ -15,6 +15,17 @@ if (-not (Test-Path ".env")) {
     Copy-Item ".env.example" ".env"
 }
 
+Get-Content ".env" |
+    Where-Object { $_ -match "^\s*[^#][^=]*=" } |
+    ForEach-Object {
+        $key, $value = $_ -split "=", 2
+        [Environment]::SetEnvironmentVariable(
+            $key.Trim(),
+            $value.Trim().Trim('"').Trim("'"),
+            "Process"
+        )
+    }
+
 if ($Install) {
     & $venvPython -m pip install --upgrade pip
     & $venvPython -m pip install -r backend\requirements.txt
@@ -34,6 +45,9 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 New-Item -ItemType Directory -Force storage\logs | Out-Null
+if ($env:HF_HOME) {
+    New-Item -ItemType Directory -Force $env:HF_HOME | Out-Null
+}
 
 Get-CimInstance Win32_Process |
     Where-Object {

@@ -53,6 +53,45 @@ def test_fit_audio_to_segment_trims_to_target(monkeypatch, tmp_path) -> None:
     assert "atrim=0:1.250" in filter_chain
 
 
+def test_overlay_segments_pads_to_total_duration(monkeypatch, tmp_path) -> None:
+    calls: list[list[str]] = []
+
+    monkeypatch.setattr(
+        media,
+        "run_command",
+        lambda args, timeout=3600: calls.append(args)
+        or subprocess.CompletedProcess(args, 0, "", ""),
+    )
+
+    media.overlay_segments([(tmp_path / "seg.wav", 0.0)], tmp_path / "dub.wav", 4.0, 1.0)
+
+    filter_complex = calls[0][calls[0].index("-filter_complex") + 1]
+    assert "apad,atrim=0:4.000" in filter_complex
+
+
+def test_mix_tracks_pads_full_replacement_to_duration(monkeypatch, tmp_path) -> None:
+    calls: list[list[str]] = []
+
+    monkeypatch.setattr(
+        media,
+        "run_command",
+        lambda args, timeout=3600: calls.append(args)
+        or subprocess.CompletedProcess(args, 0, "", ""),
+    )
+
+    media.mix_tracks(
+        None,
+        tmp_path / "dub.wav",
+        tmp_path / "final.wav",
+        duration=4.0,
+        original_volume=0.0,
+        translated_volume=1.0,
+    )
+
+    filter_chain = calls[0][calls[0].index("-af") + 1]
+    assert "apad,atrim=0:4.000" in filter_chain
+
+
 def test_verify_render_timing_rejects_long_audio(monkeypatch, tmp_path) -> None:
     audio_path = tmp_path / "final.wav"
     output_path = tmp_path / "out.mp4"
@@ -62,5 +101,18 @@ def test_verify_render_timing_rejects_long_audio(monkeypatch, tmp_path) -> None:
 
     monkeypatch.setattr(media, "audio_duration", fake_duration)
 
-    with pytest.raises(media.ProcessingError, match="longer than the source video"):
+    with pytest.raises(media.ProcessingError, match="does not match"):
+        media.verify_render_timing(5.0, audio_path, output_path, tolerance=0.25)
+
+
+def test_verify_render_timing_rejects_short_audio(monkeypatch, tmp_path) -> None:
+    audio_path = tmp_path / "final.wav"
+    output_path = tmp_path / "out.mp4"
+
+    def fake_duration(path):
+        return 4.0 if path == audio_path else 5.0
+
+    monkeypatch.setattr(media, "audio_duration", fake_duration)
+
+    with pytest.raises(media.ProcessingError, match="does not match"):
         media.verify_render_timing(5.0, audio_path, output_path, tolerance=0.25)
