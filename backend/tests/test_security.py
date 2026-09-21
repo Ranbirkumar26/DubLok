@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import pytest
 
+from app.constants import ALLOWED_ARTIFACTS
 from app.config import Settings
 from app.errors import ValidationError
 from app.security import normalize_google_drive_url, validate_public_video_url
@@ -32,3 +33,7 @@ def test_rejects_private_ip_url() -> None:
 def test_normalizes_google_drive_file_url() -> None:
     url = normalize_google_drive_url("https://drive.google.com/file/d/FILE_ID/view?usp=sharing")
     assert url == "https://drive.google.com/uc?id=FILE_ID&export=download"
+
+
+def test_final_audio_artifact_is_downloadable() -> None:
+    assert "final_audio" in ALLOWED_ARTIFACTS

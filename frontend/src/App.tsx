@@ -45,6 +45,12 @@ const orderedStages = [
   "Output",
 ];
 
+const sleep = (ms: number) => new Promise<void>((resolve) => window.setTimeout(resolve, ms));
+
+function isProcessingStatus(status?: string | null): boolean {
+  return Boolean(status && (status.startsWith("queued") || status.startsWith("running")));
+}
+
 export function App() {
   const [languages, setLanguages] = useState<Language[]>([]);
   const [source, setSource] = useState<SourceResponse | null>(null);
@@ -54,6 +60,8 @@ export function App() {
   const [url, setUrl] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [transcriptFlagged, setTranscriptFlagged] = useState(false);
+  const [sameLanguageOverride, setSameLanguageOverride] = useState(false);
 
   useEffect(() => {
     api.languages().then(setLanguages).catch((err) => setError(err.message));
@@ -78,6 +86,23 @@ export function App() {
     return 1;
   }, [source, job]);
 
+  const detectedLanguage = job?.transcript?.detected_language || null;
+  const targetLanguageLabel =
+    languages.find((language) => language.code === options.target_language)?.name || options.target_language;
+  const detectedLanguageLabel =
+    languages.find((language) => language.code === detectedLanguage)?.name || detectedLanguage || "unknown";
+  const sameLanguageNeedsConfirmation =
+    job?.status === "analysis_complete" &&
+    Boolean(detectedLanguage) &&
+    detectedLanguage === options.target_language &&
+    !job?.translated_transcript &&
+    !sameLanguageOverride;
+  const canContinueToFinal =
+    Boolean(job?.transcript) &&
+    !isProcessingStatus(job?.status) &&
+    job?.status !== "failed" &&
+    job?.status !== "completed";
+
   async function withBusy(action: () => Promise<void>) {
     setBusy(true);
     setError(null);
@@ -92,6 +117,75 @@ export function App() {
 
   function updateOption<K extends keyof Required<JobOptions>>(key: K, value: Required<JobOptions>[K]) {
     setOptions((current) => ({ ...current, [key]: value }));
+    if (key === "target_language") {
+      setSameLanguageOverride(false);
+    }
+  }
+
+  async function startJobForSource(nextSource: SourceResponse) {
+    setSource(nextSource);
+    setJob(null);
+    setTranscriptFlagged(false);
+    setSameLanguageOverride(false);
+    const created = await api.createJob(nextSource.source_id, options);
+    setJob(created);
+  }
+
+  async function waitForJobStatus(jobId: string, expectedStatuses: string[]) {
+    const expected = new Set(expectedStatuses);
+    let current = await api.getJob(jobId);
+    setJob(current);
+
+    while (!expected.has(current.status)) {
+      if (current.status === "failed") {
+        throw new Error(current.error || "Job failed");
+      }
+      await sleep(2000);
+      current = await api.getJob(jobId);
+      setJob(current);
+    }
+
+    return current;
+  }
+
+  async function saveReviewEdits(currentJob: JobResponse) {
+    let saved = currentJob;
+    if (saved.transcript) {
+      saved = await api.saveTranscript(saved.id, saved.transcript, "original");
+      setJob(saved);
+    }
+    if (saved.translated_transcript) {
+      saved = await api.saveTranscript(saved.id, saved.translated_transcript, "translated");
+      setJob(saved);
+    }
+    setTranscriptFlagged(false);
+    return saved;
+  }
+
+  async function continueToFinalVideo(forceSameLanguage = false) {
+    if (!job?.transcript) return;
+    if (sameLanguageNeedsConfirmation && !forceSameLanguage) return;
+
+    await withBusy(async () => {
+      let current = await saveReviewEdits(job);
+
+      if (!current.translated_transcript) {
+        current = await api.translate(current.id, options);
+        setJob(current);
+        current = await waitForJobStatus(current.id, ["translation_ready"]);
+      }
+
+      current = await saveReviewEdits(current);
+      if (!current.artifacts.final_audio) {
+        current = await api.generateAudio(current.id, options);
+        setJob(current);
+        current = await waitForJobStatus(current.id, ["audio_ready"]);
+      }
+
+      current = await api.render(current.id);
+      setJob(current);
+      await waitForJobStatus(current.id, ["completed"]);
+    });
   }
 
   return (
@@ -132,12 +226,12 @@ export function App() {
         <section className="panel input-panel">
           <div className="panel-title">
             <Video size={20} />
-            <h2>Video Input</h2>
+            <h2>Upload Dashboard</h2>
           </div>
           <div className="input-grid">
             <label className="dropzone">
               <Upload size={28} />
-              <span>Upload Video</span>
+              <span>Select Local Video</span>
               <input
                 type="file"
                 accept=".mp4,.mov,.mkv,.webm,video/mp4,video/webm"
@@ -147,8 +241,7 @@ export function App() {
                   if (!file) return;
                   withBusy(async () => {
                     const uploaded = await api.uploadVideo(file);
-                    setSource(uploaded);
-                    setJob(null);
+                    await startJobForSource(uploaded);
                   });
                 }}
               />
@@ -159,13 +252,12 @@ export function App() {
                 event.preventDefault();
                 withBusy(async () => {
                   const accepted = await api.submitUrl(url);
-                  setSource(accepted);
-                  setJob(null);
+                  await startJobForSource(accepted);
                 });
               }}
             >
               <label>
-                <span>YouTube or Google Drive URL</span>
+                <span>Secondary: public YouTube or Google Drive URL</span>
                 <div className="url-row">
                   <Link2 size={18} />
                   <input
@@ -196,20 +288,10 @@ export function App() {
             </div>
           )}
 
-          {source && !job && (
-            <button
-              className="primary"
-              disabled={busy}
-              onClick={() =>
-                withBusy(async () => {
-                  const created = await api.createJob(source.source_id, options);
-                  setJob(created);
-                })
-              }
-            >
-              <Mic2 size={18} />
-              Start Analysis
-            </button>
+          {source && (
+            <p className="mode-note">
+              Analysis starts automatically. Final generation waits for transcript review.
+            </p>
           )}
         </section>
 
@@ -283,51 +365,109 @@ export function App() {
           {job?.transcript && (
             <div className="language-detect">
               <span>Detected language</span>
-              <strong>{job.transcript.detected_language || "unknown"}</strong>
+              <strong>{detectedLanguageLabel}</strong>
               {job.transcript.confidence !== null && job.transcript.confidence !== undefined && (
                 <em>{Math.round(job.transcript.confidence * 100)}%</em>
               )}
             </div>
           )}
 
-          <TranscriptEditor
-            transcript={job?.translated_transcript || job?.transcript || null}
-            translated={Boolean(job?.translated_transcript)}
-            onChange={(payload) => {
-              if (!job) return;
-              setJob({
-                ...job,
-                [job.translated_transcript ? "translated_transcript" : "transcript"]: payload,
-              });
-            }}
-          />
+          {sameLanguageNeedsConfirmation && (
+            <div className="same-language-card">
+              <div>
+                <strong>Already in the requested language</strong>
+                <span>
+                  Detected {detectedLanguageLabel}, and the target is {targetLanguageLabel}.
+                </span>
+              </div>
+              <button
+                className="primary"
+                disabled={busy}
+                onClick={() => {
+                  setSameLanguageOverride(true);
+                  continueToFinalVideo(true);
+                }}
+              >
+                <Mic2 size={18} />
+                Replace voice anyway
+              </button>
+            </div>
+          )}
+
+          {job?.transcript && (
+            <div className={`review-card ${transcriptFlagged ? "flagged" : ""}`}>
+              <div>
+                <strong>{transcriptFlagged ? "Transcript flagged" : "Transcript fixed"}</strong>
+                <span>
+                  {transcriptFlagged
+                    ? "Edit the extracted text before continuing."
+                    : "Review the transcript before final generation."}
+                </span>
+              </div>
+              <button
+                type="button"
+                onClick={() => setTranscriptFlagged((current) => !current)}
+              >
+                {transcriptFlagged ? <CheckCircle2 size={18} /> : <AlertTriangle size={18} />}
+                {transcriptFlagged ? "Mark fixed" : "Flag transcript"}
+              </button>
+            </div>
+          )}
+
+          <div className="transcript-columns">
+            <div className="transcript-column">
+              <div className="column-title">
+                <strong>Original Transcript</strong>
+                {job?.transcript && <span>{job.transcript.segments.length} segments</span>}
+              </div>
+              <TranscriptEditor
+                transcript={job?.transcript || null}
+                translated={false}
+                onChange={(payload) => {
+                  if (!job) return;
+                  setJob({ ...job, transcript: payload });
+                }}
+              />
+            </div>
+
+            {job?.translated_transcript && (
+              <div className="transcript-column">
+                <div className="column-title">
+                  <strong>Translated Transcript</strong>
+                  <span>{targetLanguageLabel}</span>
+                </div>
+                <TranscriptEditor
+                  transcript={job.translated_transcript}
+                  translated
+                  onChange={(payload) => {
+                    setJob({ ...job, translated_transcript: payload });
+                  }}
+                />
+              </div>
+            )}
+          </div>
 
           <div className="button-row">
             <button
-              disabled={!job?.transcript || busy || job.status.startsWith("queued") || job.status.startsWith("running")}
+              disabled={!job?.transcript || busy || isProcessingStatus(job.status)}
               onClick={() =>
                 job &&
                 withBusy(async () => {
-                  const queued = await api.translate(job.id, options);
-                  setJob(queued);
-                })
-              }
-            >
-              <Languages size={18} />
-              Translate
-            </button>
-            <button
-              disabled={!job?.translated_transcript || busy}
-              onClick={() =>
-                job?.translated_transcript &&
-                withBusy(async () => {
-                  const saved = await api.saveTranscript(job.id, job.translated_transcript!, "translated");
+                  const saved = await saveReviewEdits(job);
                   setJob(saved);
                 })
               }
             >
               <FileText size={18} />
               Save Edits
+            </button>
+            <button
+              className="primary"
+              disabled={!canContinueToFinal || sameLanguageNeedsConfirmation || busy}
+              onClick={() => continueToFinalVideo()}
+            >
+              <Play size={18} />
+              Continue to final video
             </button>
           </div>
         </section>
@@ -420,13 +560,21 @@ export function App() {
         {job?.status === "completed" && job.artifacts.video ? (
           <div className="output-grid">
             <video controls src={absoluteUrl(job.artifacts.video.url)} />
-            <div className="downloads">
-              {Object.entries(job.artifacts).map(([key, artifact]) => (
-                <a key={key} href={`${API_BASE}${artifact.url}`}>
-                  <Download size={16} />
-                  {artifact.name}
-                </a>
-              ))}
+            <div className="output-actions">
+              {job.artifacts.final_audio && (
+                <div className="audio-preview">
+                  <span>Generated audio</span>
+                  <audio controls src={absoluteUrl(job.artifacts.final_audio.url)} />
+                </div>
+              )}
+              <div className="downloads">
+                {Object.entries(job.artifacts).map(([key, artifact]) => (
+                  <a key={key} href={`${API_BASE}${artifact.url}`}>
+                    <Download size={16} />
+                    {artifact.name}
+                  </a>
+                ))}
+              </div>
             </div>
           </div>
         ) : (

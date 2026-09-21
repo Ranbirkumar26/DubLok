@@ -32,7 +32,14 @@ LANGUAGE_OPTIONS = [
 ]
 
 ALLOWED_VIDEO_EXTENSIONS = {".mp4", ".mov", ".mkv", ".webm"}
-ALLOWED_ARTIFACTS = {"video", "srt", "vtt", "original_transcript", "translated_transcript"}
+ALLOWED_ARTIFACTS = {
+    "video",
+    "final_audio",
+    "srt",
+    "vtt",
+    "original_transcript",
+    "translated_transcript",
+}
 
 JOB_STAGES = [
     "downloading video",
