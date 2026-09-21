@@ -28,6 +28,19 @@ from app.pipeline.types import Segment, segments_from_payload, transcript_payloa
 from app.storage import copy_to_job_input, job_dir
 
 
+def validate_translated_segments(segments: list[Segment]) -> None:
+    missing_translation = [
+        segment.id
+        for segment in segments
+        if not (segment.translated_text or "").strip()
+    ]
+    if missing_translation:
+        raise ValidationError(
+            "Fill every translated transcript segment before generating audio. "
+            f"Missing: {', '.join(missing_translation)}"
+        )
+
+
 class PipelineRunner:
     def __init__(self, settings: Settings, db: Database):
         self.settings = settings
@@ -159,13 +172,12 @@ class PipelineRunner:
             raise ProcessingError("Cannot generate audio without valid media duration.")
         work_dir = job_dir(self.settings, job["id"])
         segments = segments_from_payload(translated_payload)
+        validate_translated_segments(segments)
         tts = TTSEngine(self.settings)
 
         fitted_paths: list[tuple[Path, float]] = []
         for index, segment in enumerate(segments, start=1):
-            text = (segment.translated_text or segment.text).strip()
-            if not text:
-                continue
+            text = (segment.translated_text or "").strip()
             raw_path = work_dir / "tts" / f"{segment.id}_raw.wav"
             fit_path = work_dir / "tts" / f"{segment.id}_fit.wav"
             voice = job["voice_map"].get(segment.speaker)

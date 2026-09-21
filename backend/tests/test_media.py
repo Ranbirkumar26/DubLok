@@ -50,6 +50,7 @@ def test_fit_audio_to_segment_trims_to_target(monkeypatch, tmp_path) -> None:
     media.fit_audio_to_segment(tmp_path / "raw.wav", tmp_path / "fit.wav", 1.25)
 
     filter_chain = calls[0][calls[0].index("-af") + 1]
+    assert "loudnorm=I=-18:TP=-1.5:LRA=11" in filter_chain
     assert "atrim=0:1.250" in filter_chain
 
 

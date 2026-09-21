@@ -394,6 +394,15 @@ dd {
   color: #8a4d05;
 }
 
+.same-language-card.warning {
+  background: #fff4df;
+  border-color: #f0c980;
+}
+
+.same-language-card.warning strong {
+  color: #8a4d05;
+}
+
 .transcript-columns {
   display: grid;
   gap: 14px;

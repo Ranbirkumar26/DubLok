@@ -51,6 +51,23 @@ function isProcessingStatus(status?: string | null): boolean {
   return Boolean(status && (status.startsWith("queued") || status.startsWith("running")));
 }
 
+function hasCompleteTranslatedText(transcript?: TranscriptPayload | null): boolean {
+  return Boolean(
+    transcript?.segments.length &&
+      transcript.segments.every((segment) => (segment.translated_text || "").trim().length > 0),
+  );
+}
+
+function createTranslatedDraft(transcript: TranscriptPayload): TranscriptPayload {
+  return {
+    ...transcript,
+    segments: transcript.segments.map((segment) => ({
+      ...segment,
+      translated_text: "",
+    })),
+  };
+}
+
 export function App() {
   const [languages, setLanguages] = useState<Language[]>([]);
   const [source, setSource] = useState<SourceResponse | null>(null);
@@ -97,10 +114,16 @@ export function App() {
     detectedLanguage === options.target_language &&
     !job?.translated_transcript &&
     !sameLanguageOverride;
+  const translationFailed =
+    job?.status === "failed" &&
+    Boolean(job.transcript) &&
+    !job.translated_transcript &&
+    (job.error || "").toLowerCase().includes("translation");
+  const translatedTextReady = hasCompleteTranslatedText(job?.translated_transcript);
   const canContinueToFinal =
     Boolean(job?.transcript) &&
     !isProcessingStatus(job?.status) &&
-    job?.status !== "failed" &&
+    (job?.status !== "failed" || translatedTextReady) &&
     job?.status !== "completed";
 
   async function withBusy(action: () => Promise<void>) {
@@ -176,6 +199,9 @@ export function App() {
       }
 
       current = await saveReviewEdits(current);
+      if (!hasCompleteTranslatedText(current.translated_transcript)) {
+        throw new Error("Fill every translated segment before generating audio.");
+      }
       if (!current.artifacts.final_audio) {
         current = await api.generateAudio(current.id, options);
         setJob(current);
@@ -394,6 +420,35 @@ export function App() {
             </div>
           )}
 
+          {translationFailed && (
+            <div className="same-language-card warning">
+              <div>
+                <strong>Translation needs review</strong>
+                <span>
+                  The local translation model is unavailable. Create an editable translated draft, fill each segment,
+                  then continue to final video.
+                </span>
+              </div>
+              <button
+                disabled={busy}
+                onClick={() =>
+                  job?.transcript &&
+                  withBusy(async () => {
+                    const saved = await api.saveTranscript(
+                      job.id,
+                      createTranslatedDraft(job.transcript!),
+                      "translated",
+                    );
+                    setJob(saved);
+                  })
+                }
+              >
+                <Languages size={18} />
+                Manual translation
+              </button>
+            </div>
+          )}
+
           {job?.transcript && (
             <div className={`review-card ${transcriptFlagged ? "flagged" : ""}`}>
               <div>
@@ -447,6 +502,13 @@ export function App() {
             )}
           </div>
 
+          {job?.translated_transcript && !translatedTextReady && (
+            <div className="inline-error">
+              <AlertTriangle size={16} />
+              Fill every translated segment before continuing to audio generation.
+            </div>
+          )}
+
           <div className="button-row">
             <button
               disabled={!job?.transcript || busy || isProcessingStatus(job.status)}
@@ -462,8 +524,25 @@ export function App() {
               Save Edits
             </button>
             <button
+              disabled={!job?.transcript || Boolean(job.translated_transcript) || busy || isProcessingStatus(job.status)}
+              onClick={() =>
+                job?.transcript &&
+                withBusy(async () => {
+                  const saved = await api.saveTranscript(
+                    job.id,
+                    createTranslatedDraft(job.transcript!),
+                    "translated",
+                  );
+                  setJob(saved);
+                })
+              }
+            >
+              <Languages size={18} />
+              Manual translation
+            </button>
+            <button
               className="primary"
-              disabled={!canContinueToFinal || sameLanguageNeedsConfirmation || busy}
+              disabled={!canContinueToFinal || sameLanguageNeedsConfirmation || busy || (Boolean(job?.translated_transcript) && !translatedTextReady)}
               onClick={() => continueToFinalVideo()}
             >
               <Play size={18} />

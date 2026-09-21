@@ -8,6 +8,17 @@ from app.config import Settings
 from app.constants import SUPPORTED_LANGUAGES
 from app.errors import DependencyMissingError, ProcessingError
 
+RECOMMENDED_TTS_SPEAKERS = {
+    "hi": "Divya",
+    "en": "Thoma",
+    "ta": "Jaya",
+    "te": "Prakash",
+    "kn": "Suresh",
+    "ml": "Anjali",
+    "bn": "Aditi",
+    "mr": "Sunita",
+}
+
 
 class TTSEngine:
     def __init__(self, settings: Settings):
@@ -47,9 +58,7 @@ class TTSEngine:
             ) from exc
 
         model_name = "ai4bharat/indic-parler-tts"
-        language_name = SUPPORTED_LANGUAGES.get(language, SUPPORTED_LANGUAGES["en"]).name
-        speaker = voice or "a clear neutral speaker"
-        prompt = f"{speaker} speaking {language_name} with natural conversational pacing."
+        prompt = self._voice_description(language, voice)
         device = "cuda" if self.settings.device != "cpu" and torch.cuda.is_available() else "cpu"
         try:
             model = ParlerTTSForConditionalGeneration.from_pretrained(
@@ -80,6 +89,24 @@ class TTSEngine:
                 "Indic Parler-TTS failed. Confirm Hugging Face model access, token, "
                 f"and local runtime dependencies: {exc}"
             ) from exc
+
+    def _voice_description(self, language: str, voice: str | None) -> str:
+        requested_voice = (voice or "").strip()
+        if requested_voice and (" " in requested_voice or "." in requested_voice):
+            return requested_voice
+
+        speaker = requested_voice or RECOMMENDED_TTS_SPEAKERS.get(language)
+        if speaker:
+            return (
+                f"{speaker}'s voice is clear and natural, with a moderate pace and pitch. "
+                "The recording is very clear audio, close-sounding, and has no background noise."
+            )
+
+        language_name = SUPPORTED_LANGUAGES.get(language, SUPPORTED_LANGUAGES["en"]).name
+        return (
+            f"A native {language_name} speaker delivers clear, natural speech at a moderate pace "
+            "and pitch. The recording is very clear audio, close-sounding, and has no background noise."
+        )
 
     def _demo_tone(self, text: str, output_path: Path) -> None:
         sample_rate = 22050

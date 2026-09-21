@@ -174,6 +174,7 @@ def fit_audio_to_segment(input_path: Path, output_path: Path, target_duration: f
     ratio = source_duration / max(target_duration, 0.05)
     filter_chain = (
         f"{atempo_chain(ratio)},"
+        "loudnorm=I=-18:TP=-1.5:LRA=11,"
         f"apad,atrim=0:{target_duration:.3f},asetpts=N/SR/TB"
     )
     run_command(

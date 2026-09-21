@@ -12,6 +12,12 @@ WHISPER_MODEL_BY_PRESET = {
     "quality": "medium",
 }
 
+WHISPER_FALLBACKS = {
+    "medium": ["small", "tiny"],
+    "small": ["tiny"],
+    "tiny": [],
+}
+
 
 class Transcriber:
     def __init__(self, settings: Settings, model_preset: str):
@@ -58,8 +64,45 @@ class Transcriber:
         model_size = WHISPER_MODEL_BY_PRESET.get(self.model_preset, "small")
         device = "cpu" if self.settings.device == "cpu" else "auto"
         compute_type = "int8" if device == "cpu" else "float16"
+        model_errors: list[str] = []
+        model_names = [model_size, *WHISPER_FALLBACKS.get(model_size, [])]
+        cached_models = [
+            (candidate, cached_path)
+            for candidate in model_names
+            if (cached_path := self._cached_whisper_model_path(candidate))
+        ]
+        load_candidates: list[tuple[str, str | Path, bool]]
+        if cached_models:
+            load_candidates = [
+                (candidate, cached_path, True)
+                for candidate, cached_path in cached_models
+            ]
+        else:
+            load_candidates = [
+                (candidate, candidate, False)
+                for candidate in model_names
+            ]
+
+        model = None
+        for label, model_ref, local_files_only in load_candidates:
+            try:
+                model = WhisperModel(
+                    str(model_ref),
+                    device=device,
+                    compute_type=compute_type,
+                    local_files_only=local_files_only,
+                    use_auth_token=self.settings.huggingface_hub_token or None,
+                )
+                break
+            except Exception as exc:  # pragma: no cover - depends on local model/runtime
+                model_errors.append(f"{label}: {exc}")
+                if label == load_candidates[-1][0]:
+                    raise ProcessingError(
+                        "Transcription failed while loading Whisper models. "
+                        "Tried " + "; ".join(model_errors)
+                    ) from exc
+
         try:
-            model = WhisperModel(model_size, device=device, compute_type=compute_type)
             raw_segments, info = model.transcribe(
                 str(audio_path),
                 language=language,
@@ -91,3 +134,33 @@ class Transcriber:
             detected_language=getattr(info, "language", None),
             confidence=getattr(info, "language_probability", None),
         )
+
+    def _cached_whisper_model_path(self, model_size: str) -> Path | None:
+        snapshots_dir = (
+            self.settings.hf_home
+            / "hub"
+            / f"models--Systran--faster-whisper-{model_size}"
+            / "snapshots"
+        )
+        if not snapshots_dir.is_dir():
+            return None
+
+        candidates: list[Path] = []
+        ref_path = snapshots_dir.parent / "refs" / "main"
+        if ref_path.is_file():
+            ref = ref_path.read_text(encoding="utf-8").strip()
+            if ref:
+                candidates.append(snapshots_dir / ref)
+        candidates.extend(
+            sorted(
+                (path for path in snapshots_dir.iterdir() if path.is_dir()),
+                key=lambda path: path.stat().st_mtime,
+                reverse=True,
+            )
+        )
+
+        required_files = ("config.json", "model.bin", "tokenizer.json", "vocabulary.txt")
+        for candidate in candidates:
+            if all((candidate / filename).exists() for filename in required_files):
+                return candidate
+        return None
