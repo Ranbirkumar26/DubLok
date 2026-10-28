@@ -576,6 +576,7 @@ export function App() {
             step={0.05}
             onChange={(value) => updateOption("speech_speed", value)}
           />
+          <p className="mode-note">Pitch matching is automatic: generated speech follows the source segment pitch before timing fit.</p>
           {options.audio_mode === "preserve_background" && (
             <Range
               label="Background Volume"

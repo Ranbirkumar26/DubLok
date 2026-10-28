@@ -14,7 +14,7 @@ The project is designed to be reproducible without paid APIs. All inference runs
 - Local ASR/language detection through faster-whisper.
 - Local translation through IndicTrans2.
 - Local TTS through Indic Parler-TTS.
-- Segment-level audio fitting so generated speech is stretched, trimmed, or padded to the source timestamps.
+- Segment-level pitch matching and audio fitting so generated speech follows the source high/low pitch, then gets stretched, trimmed, or padded to the source timestamps.
 - Full Replacement mode by default: the final video maps original video plus generated audio only.
 - Downloadable final MP4, generated audio, SRT, VTT, original transcript, and translated transcript.
 
@@ -41,7 +41,7 @@ Model files are downloaded to local disk. Video files, transcripts, audio, and r
 | ASR and language detection | faster-whisper | Local Whisper inference through CTranslate2. |
 | VAD | Silero VAD | Local speech region detection. |
 | Speaker labels | SpeechBrain ECAPA embeddings | Best-effort clustering with single-speaker fallback. |
-| Translation | AI4Bharat IndicTrans2 | Local model; gated Hugging Face access may be required. |
+| Translation | AI4Bharat IndicTrans2, with NLLB local fallback | IndicTrans2 is preferred; NLLB fallback is used if gated access blocks the primary model. |
 | TTS | AI4Bharat Indic Parler-TTS | Local model; gated Hugging Face access may be required. |
 | Background preservation | Demucs | Optional/best-effort; Full Replacement does not require original audio mixing. |
 | Timing and muxing | FFmpeg filters | Segment-level stretch, trim, pad, overlay, and final MP4 mux. |
@@ -210,7 +210,7 @@ HUGGINGFACE_HUB_TOKEN=hf_your_token_here
 .\.venv\Scripts\python.exe backend\scripts\check_models.py
 ```
 
-If model access is not accepted for that account, translation or TTS may fail with a `403` or gated-model error. Accept the terms, keep the token in `.env`, and retry.
+If IndicTrans2 access is not accepted for that account, DubLok falls back to the free local NLLB model for translation. TTS still requires Indic Parler-TTS access; if TTS fails with a `403`, accept the terms, keep the token in `.env`, and retry.
 
 ## Production Startup On Windows
 
@@ -302,6 +302,7 @@ pnpm dev --host 127.0.0.1 --port 5173
 7. If the transcript is wrong, mark `Transcript flagged`, edit the text, save it, then mark it fixed.
 8. Click `Continue to final video`.
 9. The frontend runs translation, audio generation, and render in sequence.
+   During audio generation, each generated segment is pitch-shifted toward the matching source segment before it is fitted to the timestamp window.
 10. Preview or download:
     - final merged MP4,
     - generated audio,

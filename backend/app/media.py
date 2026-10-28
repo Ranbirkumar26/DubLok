@@ -129,6 +129,15 @@ def audio_duration(path: Path) -> float:
     return float((data.get("format") or {}).get("duration") or 0)
 
 
+def audio_sample_rate(path: Path) -> int:
+    data = ffprobe_json(path)
+    audio_stream = next(
+        (stream for stream in data.get("streams", []) if stream.get("codec_type") == "audio"),
+        {},
+    )
+    return int(audio_stream.get("sample_rate") or 44100)
+
+
 def create_silence(path: Path, duration: float, sample_rate: int = 44100) -> None:
     require_command("ffmpeg")
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -176,6 +185,96 @@ def fit_audio_to_segment(input_path: Path, output_path: Path, target_duration: f
         f"{atempo_chain(ratio)},"
         "loudnorm=I=-18:TP=-1.5:LRA=11,"
         f"apad,atrim=0:{target_duration:.3f},asetpts=N/SR/TB"
+    )
+    run_command(
+        [
+            "ffmpeg",
+            "-y",
+            "-i",
+            str(input_path),
+            "-af",
+            filter_chain,
+            "-ar",
+            "44100",
+            "-ac",
+            "1",
+            str(output_path),
+        ]
+    )
+
+
+def estimate_median_pitch_hz(
+    audio_path: Path,
+    *,
+    start_seconds: float = 0.0,
+    duration_seconds: float | None = None,
+) -> float | None:
+    try:
+        import librosa
+        import numpy as np
+    except ImportError:
+        return None
+
+    try:
+        samples, sample_rate = librosa.load(
+            str(audio_path),
+            sr=16000,
+            mono=True,
+            offset=max(0.0, start_seconds),
+            duration=duration_seconds,
+        )
+    except Exception:
+        return None
+    if samples.size < int(sample_rate * 0.08):
+        return None
+
+    try:
+        f0, voiced, _ = librosa.pyin(
+            samples,
+            fmin=librosa.note_to_hz("C2"),
+            fmax=librosa.note_to_hz("C6"),
+            sr=sample_rate,
+        )
+    except Exception:
+        return None
+    voiced_pitch = f0[voiced & np.isfinite(f0)]
+    if voiced_pitch.size == 0:
+        return None
+    return float(np.median(voiced_pitch))
+
+
+def match_pitch_to_source(
+    source_audio_path: Path,
+    generated_audio_path: Path,
+    output_path: Path,
+    *,
+    source_start: float,
+    source_duration: float,
+) -> Path:
+    source_pitch = estimate_median_pitch_hz(
+        source_audio_path,
+        start_seconds=source_start,
+        duration_seconds=source_duration,
+    )
+    generated_pitch = estimate_median_pitch_hz(generated_audio_path)
+    if not source_pitch or not generated_pitch:
+        return generated_audio_path
+
+    ratio = clamp_float(source_pitch / generated_pitch, 0.75, 1.35)
+    if abs(ratio - 1.0) < 0.03:
+        return generated_audio_path
+
+    pitch_shift_audio(generated_audio_path, output_path, ratio)
+    return output_path
+
+
+def pitch_shift_audio(input_path: Path, output_path: Path, ratio: float) -> None:
+    sample_rate = audio_sample_rate(input_path)
+    shifted_rate = max(8000, int(round(sample_rate * clamp_float(ratio, 0.75, 1.35))))
+    filter_chain = (
+        f"asetrate={shifted_rate},"
+        f"aresample={sample_rate},"
+        f"{atempo_chain(sample_rate / shifted_rate)}"
     )
     run_command(
         [

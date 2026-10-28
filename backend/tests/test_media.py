@@ -54,6 +54,53 @@ def test_fit_audio_to_segment_trims_to_target(monkeypatch, tmp_path) -> None:
     assert "atrim=0:1.250" in filter_chain
 
 
+def test_match_pitch_to_source_shifts_generated_audio(monkeypatch, tmp_path) -> None:
+    calls: list[list[str]] = []
+    source_path = tmp_path / "source.wav"
+    raw_path = tmp_path / "raw.wav"
+    pitch_path = tmp_path / "pitch.wav"
+
+    def fake_pitch(path, **_kwargs):
+        return 132.0 if path == source_path else 110.0
+
+    monkeypatch.setattr(media, "estimate_median_pitch_hz", fake_pitch)
+    monkeypatch.setattr(media, "audio_sample_rate", lambda _path: 44100)
+    monkeypatch.setattr(
+        media,
+        "run_command",
+        lambda args, timeout=3600: calls.append(args)
+        or subprocess.CompletedProcess(args, 0, "", ""),
+    )
+
+    result = media.match_pitch_to_source(
+        source_path,
+        raw_path,
+        pitch_path,
+        source_start=1.0,
+        source_duration=2.0,
+    )
+
+    assert result == pitch_path
+    filter_chain = calls[0][calls[0].index("-af") + 1]
+    assert "asetrate=52920" in filter_chain
+    assert "atempo=0.833333" in filter_chain
+
+
+def test_match_pitch_to_source_skips_when_pitch_is_missing(monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(media, "estimate_median_pitch_hz", lambda *_args, **_kwargs: None)
+
+    raw_path = tmp_path / "raw.wav"
+    result = media.match_pitch_to_source(
+        tmp_path / "source.wav",
+        raw_path,
+        tmp_path / "pitch.wav",
+        source_start=0.0,
+        source_duration=1.0,
+    )
+
+    assert result == raw_path
+
+
 def test_overlay_segments_pads_to_total_duration(monkeypatch, tmp_path) -> None:
     calls: list[list[str]] = []
 

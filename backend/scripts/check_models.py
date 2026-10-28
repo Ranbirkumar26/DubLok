@@ -10,6 +10,7 @@ from pathlib import Path
 REQUIRED_COMMANDS = ["ffmpeg", "ffprobe"]
 PRODUCTION_PACKAGES = [
     ("faster_whisper", "ASR"),
+    ("librosa", "Pitch matching"),
     ("transformers", "Translation/TTS"),
     ("torch", "Local model runtime"),
     ("torchaudio", "Diarization runtime"),

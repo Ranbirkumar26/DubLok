@@ -11,6 +11,8 @@ MODEL_BY_DIRECTION = {
     "indic_to_indic": "ai4bharat/indictrans2-indic-indic-1B",
 }
 
+NLLB_FALLBACK_MODEL = "facebook/nllb-200-distilled-600M"
+
 
 class Translator:
     def __init__(self, settings: Settings):
@@ -51,11 +53,17 @@ class Translator:
             for segment in segments:
                 segment.translated_text = f"[{target_name}] {segment.text}"
             return segments
-        translations = self._indictrans2(
-            [segment.text for segment in segments],
-            source_language,
-            target_language,
-        )
+        texts = [segment.text for segment in segments]
+        try:
+            translations = self._indictrans2(texts, source_language, target_language)
+        except ProcessingError as indic_error:
+            try:
+                translations = self._nllb(texts, source_language, target_language)
+            except ProcessingError as fallback_error:
+                raise ProcessingError(
+                    f"{indic_error.message}\nNLLB fallback also failed: "
+                    f"{fallback_error.message}"
+                ) from fallback_error
         for segment, translated in zip(segments, translations):
             segment.translated_text = translated
         return segments
@@ -126,6 +134,57 @@ class Translator:
         if source_language != "en" and target_language == "en":
             return "indic_to_en"
         return "indic_to_indic"
+
+    def _nllb(
+        self,
+        texts: list[str],
+        source_language: str,
+        target_language: str,
+    ) -> list[str]:
+        self.settings.apply_model_environment()
+        try:
+            import torch
+            from transformers import AutoModelForSeq2SeqLM, AutoTokenizer
+        except ImportError as exc:
+            raise DependencyMissingError(
+                "NLLB fallback dependencies are missing. Run `pip install -r backend/requirements-ml.txt`."
+            ) from exc
+
+        source_tag = SUPPORTED_LANGUAGES[source_language].indic_tag
+        target_tag = SUPPORTED_LANGUAGES[target_language].indic_tag
+        device = self._torch_device(torch)
+        try:
+            tokenizer = AutoTokenizer.from_pretrained(
+                NLLB_FALLBACK_MODEL,
+                token=self.settings.huggingface_hub_token or None,
+            )
+            model = AutoModelForSeq2SeqLM.from_pretrained(
+                NLLB_FALLBACK_MODEL,
+                token=self.settings.huggingface_hub_token or None,
+            ).to(device)
+            tokenizer.src_lang = source_tag
+            encoded = tokenizer(
+                texts,
+                return_tensors="pt",
+                padding=True,
+                truncation=True,
+                max_length=512,
+            )
+            encoded = {key: value.to(device) for key, value in encoded.items()}
+            forced_bos_token_id = tokenizer.convert_tokens_to_ids(target_tag)
+            with torch.no_grad():
+                output = model.generate(
+                    **encoded,
+                    forced_bos_token_id=forced_bos_token_id,
+                    max_new_tokens=256,
+                    num_beams=4,
+                )
+            return [
+                item.strip()
+                for item in tokenizer.batch_decode(output, skip_special_tokens=True)
+            ]
+        except Exception as exc:  # pragma: no cover - depends on local model/runtime
+            raise ProcessingError(f"NLLB fallback translation failed: {exc}") from exc
 
     def _torch_device(self, torch_module: object) -> str:
         if self.settings.device == "cpu":

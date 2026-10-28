@@ -11,6 +11,7 @@ from app.errors import AppError, ProcessingError, ValidationError
 from app.media import (
     extract_audio,
     fit_audio_to_segment,
+    match_pitch_to_source,
     mix_tracks,
     overlay_segments,
     probe_video,
@@ -174,11 +175,13 @@ class PipelineRunner:
         segments = segments_from_payload(translated_payload)
         validate_translated_segments(segments)
         tts = TTSEngine(self.settings)
+        source_audio = Path(artifacts.get("source_audio") or "")
 
         fitted_paths: list[tuple[Path, float]] = []
         for index, segment in enumerate(segments, start=1):
             text = (segment.translated_text or "").strip()
             raw_path = work_dir / "tts" / f"{segment.id}_raw.wav"
+            pitch_path = work_dir / "tts" / f"{segment.id}_pitch.wav"
             fit_path = work_dir / "tts" / f"{segment.id}_fit.wav"
             voice = job["voice_map"].get(segment.speaker)
             self._stage(
@@ -192,6 +195,22 @@ class PipelineRunner:
                     output_path=raw_path,
                 ),
             )
+            sync_input = raw_path
+            if source_audio.exists():
+                sync_input = self._stage(
+                    job,
+                    f"matching pitch {index}/{len(segments)}",
+                    80,
+                    lambda raw_path=raw_path, pitch_path=pitch_path, segment=segment: (
+                        match_pitch_to_source(
+                            source_audio,
+                            raw_path,
+                            pitch_path,
+                            source_start=segment.start,
+                            source_duration=segment.duration,
+                        )
+                    ),
+                )
             target_duration = min(
                 segment.duration,
                 max(0.05, segment.duration / max(float(job["speech_speed"]), 0.5)),
@@ -200,8 +219,8 @@ class PipelineRunner:
                 job,
                 "synchronizing audio",
                 82,
-                lambda raw_path=raw_path, fit_path=fit_path, target_duration=target_duration: (
-                    fit_audio_to_segment(raw_path, fit_path, target_duration)
+                lambda sync_input=sync_input, fit_path=fit_path, target_duration=target_duration: (
+                    fit_audio_to_segment(sync_input, fit_path, target_duration)
                 ),
             )
             fitted_paths.append((fit_path, segment.start))

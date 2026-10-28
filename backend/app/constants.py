@@ -50,6 +50,7 @@ JOB_STAGES = [
     "separating speech/background",
     "translating",
     "generating translated speech",
+    "matching pitch",
     "synchronizing audio",
     "mixing audio",
     "generating subtitles",
