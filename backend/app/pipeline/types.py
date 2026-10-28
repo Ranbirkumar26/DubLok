@@ -36,6 +36,35 @@ class Segment:
         )
 
 
+SENTENCE_END = (".", "?", "!", "।", "…")
+
+
+def merge_sentence_fragments(
+    segments: list[Segment],
+    *,
+    max_gap: float = 1.5,
+    max_duration: float = 20.0,
+) -> list[Segment]:
+    """Join same-speaker ASR segments that split a sentence, so each is translated whole."""
+    merged: list[Segment] = []
+    for segment in segments:
+        previous = merged[-1] if merged else None
+        if (
+            previous
+            and previous.speaker == segment.speaker
+            and not previous.text.rstrip().endswith(SENTENCE_END)
+            and segment.start - previous.end <= max_gap
+            and segment.end - previous.start <= max_duration
+        ):
+            previous.end = segment.end
+            previous.text = f"{previous.text.rstrip()} {segment.text.lstrip()}"
+            continue
+        merged.append(Segment.from_dict(segment.to_dict()))
+    for index, segment in enumerate(merged, start=1):
+        segment.id = f"seg_{index:04d}"
+    return merged
+
+
 def transcript_payload(
     *,
     segments: list[Segment],

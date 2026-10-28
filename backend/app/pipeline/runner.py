@@ -9,13 +9,19 @@ from app.config import Settings
 from app.db import Database
 from app.errors import AppError, ProcessingError, ValidationError
 from app.media import (
+    active_speech_db,
+    clamp_float,
+    estimate_median_pitch_hz,
     extract_audio,
     fit_audio_to_segment,
     match_pitch_to_source,
+    measure_loudness,
     mix_tracks,
+    normalize_loudness,
     overlay_segments,
     probe_video,
     render_video,
+    trim_silence,
     verify_render_timing,
 )
 from app.pipeline.diarization import Diarizer
@@ -24,8 +30,13 @@ from app.pipeline.separation import BackgroundSeparator
 from app.pipeline.subtitles import write_srt, write_vtt
 from app.pipeline.transcription import Transcriber
 from app.pipeline.translation import Translator
-from app.pipeline.tts import TTSEngine
-from app.pipeline.types import Segment, segments_from_payload, transcript_payload
+from app.pipeline.tts import TTSEngine, gender_from_pitch
+from app.pipeline.types import (
+    Segment,
+    merge_sentence_fragments,
+    segments_from_payload,
+    transcript_payload,
+)
 from app.storage import copy_to_job_input, job_dir
 
 
@@ -117,7 +128,7 @@ class PipelineRunner:
             segments = segments_from_payload(transcript)
             assigned = Diarizer(self.settings).assign_speakers(audio_path, segments)
             return transcript_payload(
-                segments=assigned,
+                segments=merge_sentence_fragments(assigned),
                 detected_language=transcript.get("detected_language"),
                 confidence=transcript.get("confidence"),
             )
@@ -176,11 +187,14 @@ class PipelineRunner:
         validate_translated_segments(segments)
         tts = TTSEngine(self.settings)
         source_audio = Path(artifacts.get("source_audio") or "")
+        has_source = source_audio.exists()
+        speaker_genders = self._speaker_genders(segments, source_audio) if has_source else {}
 
         fitted_paths: list[tuple[Path, float]] = []
         for index, segment in enumerate(segments, start=1):
             text = (segment.translated_text or "").strip()
             raw_path = work_dir / "tts" / f"{segment.id}_raw.wav"
+            trim_path = work_dir / "tts" / f"{segment.id}_trim.wav"
             pitch_path = work_dir / "tts" / f"{segment.id}_pitch.wav"
             fit_path = work_dir / "tts" / f"{segment.id}_fit.wav"
             voice = job["voice_map"].get(segment.speaker)
@@ -188,39 +202,46 @@ class PipelineRunner:
                 job,
                 f"generating translated speech {index}/{len(segments)}",
                 60 + min(20, index / max(len(segments), 1) * 20),
-                lambda text=text, raw_path=raw_path, voice=voice: tts.synthesize(
+                lambda text=text, raw_path=raw_path, voice=voice, segment=segment: tts.synthesize(
                     text=text,
                     language=job["target_language"],
                     voice=voice,
+                    gender=speaker_genders.get(segment.speaker),
                     output_path=raw_path,
                 ),
             )
-            sync_input = raw_path
-            if source_audio.exists():
+            trim_silence(raw_path, trim_path)
+            sync_input = trim_path
+            gain_db = 0.0
+            if has_source:
                 sync_input = self._stage(
                     job,
                     f"matching pitch {index}/{len(segments)}",
                     80,
-                    lambda raw_path=raw_path, pitch_path=pitch_path, segment=segment: (
+                    lambda trim_path=trim_path, pitch_path=pitch_path, segment=segment: (
                         match_pitch_to_source(
                             source_audio,
-                            raw_path,
+                            trim_path,
                             pitch_path,
                             source_start=segment.start,
                             source_duration=segment.duration,
                         )
                     ),
                 )
-            target_duration = min(
-                segment.duration,
-                max(0.05, segment.duration / max(float(job["speech_speed"]), 0.5)),
-            )
+                gain_db = self._segment_gain_db(source_audio, sync_input, segment)
+            next_start = segments[index].start if index < len(segments) else duration
             self._stage(
                 job,
                 "synchronizing audio",
                 82,
-                lambda sync_input=sync_input, fit_path=fit_path, target_duration=target_duration: (
-                    fit_audio_to_segment(sync_input, fit_path, target_duration)
+                lambda sync_input=sync_input, fit_path=fit_path, segment=segment,
+                next_start=next_start, gain_db=gain_db: fit_audio_to_segment(
+                    sync_input,
+                    fit_path,
+                    segment.duration,
+                    max_duration=max(segment.duration, next_start - segment.start),
+                    base_tempo=float(job["speech_speed"]),
+                    gain_db=gain_db,
                 ),
             )
             fitted_paths.append((fit_path, segment.start))
@@ -251,7 +272,7 @@ class PipelineRunner:
                 ),
             )
 
-        final_audio = work_dir / "audio" / "final_mix.wav"
+        mixed_audio = work_dir / "audio" / "mixed.wav"
         self._stage(
             job,
             "mixing audio",
@@ -259,11 +280,20 @@ class PipelineRunner:
             lambda: mix_tracks(
                 background_path,
                 dubbed_track,
-                final_audio,
+                mixed_audio,
                 duration=duration,
                 original_volume=float(job["original_volume"]),
                 translated_volume=1.0,
             ),
+        )
+        final_audio = work_dir / "audio" / "final_mix.wav"
+        source_loudness = measure_loudness(source_audio) if has_source else None
+        target_lufs = float(source_loudness["input_i"]) if source_loudness else -16.0
+        self._stage(
+            job,
+            "normalizing loudness",
+            91,
+            lambda: normalize_loudness(mixed_audio, final_audio, target_lufs),
         )
 
         subtitle_artifacts = self._write_subtitles(job, segments, work_dir)
@@ -315,6 +345,36 @@ class PipelineRunner:
             progress=100,
             artifacts=artifacts,
         )
+
+    @staticmethod
+    def _speaker_genders(segments: list[Segment], source_audio: Path) -> dict[str, str]:
+        """Guess each speaker's gender from the median pitch of their longest turn."""
+        genders: dict[str, str] = {}
+        for segment in sorted(segments, key=lambda item: item.duration, reverse=True):
+            if segment.speaker in genders:
+                continue
+            gender = gender_from_pitch(
+                estimate_median_pitch_hz(
+                    source_audio,
+                    start_seconds=segment.start,
+                    duration_seconds=segment.duration,
+                )
+            )
+            if gender:
+                genders[segment.speaker] = gender
+        return genders
+
+    @staticmethod
+    def _segment_gain_db(source_audio: Path, generated: Path, segment: Segment) -> float:
+        """Gain that puts the dubbed line at the source line's speech level, so relative
+        levels between speakers survive the final whole-track normalisation."""
+        source_db = active_speech_db(
+            source_audio, start_seconds=segment.start, duration_seconds=segment.duration
+        )
+        generated_db = active_speech_db(generated)
+        if source_db is None or generated_db is None:
+            return 0.0
+        return clamp_float(source_db - generated_db, -12.0, 20.0)
 
     def fail(self, job: dict[str, Any], message: str) -> None:
         self.db.update_job(

@@ -1,9 +1,16 @@
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
 from app.config import Settings
 from app.pipeline.types import Segment
+
+logger = logging.getLogger(__name__)
+
+# ECAPA cosine distance: one speaker's turns measured up to ~0.42 on short clips,
+# two different speakers ~0.94. 0.18 split single speakers.
+SPEAKER_DISTANCE_THRESHOLD = 0.5
 
 
 def assign_two_segment_speakers(
@@ -11,7 +18,7 @@ def assign_two_segment_speakers(
     usable_indices: list[int],
     embeddings: list[object],
     *,
-    threshold: float = 0.18,
+    threshold: float = SPEAKER_DISTANCE_THRESHOLD,
 ) -> None:
     import numpy as np
 
@@ -33,29 +40,34 @@ class Diarizer:
         if self.settings.engine_mode == "demo":
             return segments
         try:
-            assigned = self._speechbrain_cluster(audio_path, segments)
-        except Exception:
+            return self._speechbrain_cluster(audio_path, segments)
+        except Exception as exc:
             # Diarization is explicitly best-effort. Keeping the transcript usable is
             # more valuable than failing the whole job when embeddings are unavailable.
-            assigned = segments
-        return self._short_dialogue_fallback(assigned)
+            # The pause heuristic only runs here: it must not override an embedding
+            # decision that both turns are the same voice.
+            logger.warning("Speaker embeddings unavailable, using pause heuristic: %s", exc)
+            return self._short_dialogue_fallback(segments)
 
     def _speechbrain_cluster(self, audio_path: Path, segments: list[Segment]) -> list[Segment]:
         import numpy as np
         import torch
-        import torchaudio
+        import soundfile
         from sklearn.cluster import AgglomerativeClustering
         from speechbrain.inference.speaker import EncoderClassifier
+        from speechbrain.utils.fetching import LocalStrategy
 
         if len(segments) < 2:
             return segments
 
-        signal, sample_rate = torchaudio.load(str(audio_path))
-        if signal.shape[0] > 1:
-            signal = signal.mean(dim=0, keepdim=True)
+        # torchaudio.load needs torchcodec on torchaudio>=2.9; soundfile reads WAV directly.
+        samples, sample_rate = soundfile.read(str(audio_path), dtype="float32", always_2d=True)
+        signal = torch.from_numpy(samples.mean(axis=1)).unsqueeze(0)
         classifier = EncoderClassifier.from_hparams(
             source="speechbrain/spkrec-ecapa-voxceleb",
             savedir=str(self.settings.storage_root / "models" / "speechbrain_ecapa"),
+            # Default SYMLINK strategy needs admin/developer mode on Windows.
+            local_strategy=LocalStrategy.COPY,
         )
 
         embeddings: list[np.ndarray] = []
@@ -77,11 +89,18 @@ class Diarizer:
             assign_two_segment_speakers(segments, usable_indices, embeddings)
             return segments
 
-        # Conservative estimate: short clips normally have one or two speakers.
-        n_clusters = 2 if len(embeddings) < 12 else min(4, max(2, len(embeddings) // 8))
-        labels = AgglomerativeClustering(n_clusters=n_clusters).fit_predict(np.vstack(embeddings))
+        # Cluster by voice distance instead of forcing a speaker count, so a
+        # single-speaker clip stays one speaker.
+        labels = AgglomerativeClustering(
+            n_clusters=None,
+            distance_threshold=SPEAKER_DISTANCE_THRESHOLD,
+            metric="cosine",
+            linkage="average",
+        ).fit_predict(np.vstack(embeddings))
+        numbering: dict[int, int] = {}
         for segment_index, label in zip(usable_indices, labels):
-            segments[segment_index].speaker = f"Speaker {int(label) + 1}"
+            number = numbering.setdefault(int(label), len(numbering) + 1)
+            segments[segment_index].speaker = f"Speaker {number}"
         return segments
 
     def _short_dialogue_fallback(self, segments: list[Segment]) -> list[Segment]:

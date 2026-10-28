@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 from app.config import Settings
@@ -14,6 +15,14 @@ MODEL_BY_DIRECTION = {
 }
 
 NLLB_FALLBACK_MODEL = "facebook/nllb-200-distilled-600M"
+
+_SENTENCE_BOUNDARY = re.compile(r"(?<=[.?!।])\s+")
+
+
+def split_sentences(text: str) -> list[str]:
+    return [part.strip() for part in _SENTENCE_BOUNDARY.split(text) if part.strip()]
+
+
 PAIR_FALLBACK_MODELS = {
     ("en", "hi"): "Helsinki-NLP/opus-mt-en-hi",
     ("hi", "en"): "Helsinki-NLP/opus-mt-hi-en",
@@ -59,26 +68,39 @@ class Translator:
             for segment in segments:
                 segment.translated_text = f"[{target_name}] {segment.text}"
             return segments
-        texts = [segment.text for segment in segments]
+        # Seq2seq MT drops sentences from multi-sentence inputs, so translate one
+        # sentence at a time and join the results back per segment.
+        sentence_lists = [split_sentences(segment.text) for segment in segments]
+        texts = [sentence for sentences in sentence_lists for sentence in sentences]
+        translations = self._translate_texts(texts, source_language, target_language)
+        position = 0
+        for segment, sentences in zip(segments, sentence_lists):
+            parts = translations[position : position + len(sentences)]
+            position += len(sentences)
+            segment.translated_text = " ".join(part for part in parts if part).strip()
+        return segments
+
+    def _translate_texts(
+        self,
+        texts: list[str],
+        source_language: str,
+        target_language: str,
+    ) -> list[str]:
+        if not texts:
+            return []
         model_name = MODEL_BY_DIRECTION[self._direction(source_language, target_language)]
         if not self._model_is_cached(model_name):
-            translations = self._fallback_translate(texts, source_language, target_language)
-            for segment, translated in zip(segments, translations):
-                segment.translated_text = translated
-            return segments
+            return self._fallback_translate(texts, source_language, target_language)
         try:
-            translations = self._indictrans2(texts, source_language, target_language)
+            return self._indictrans2(texts, source_language, target_language)
         except ProcessingError as indic_error:
             try:
-                translations = self._fallback_translate(texts, source_language, target_language)
+                return self._fallback_translate(texts, source_language, target_language)
             except ProcessingError as fallback_error:
                 raise ProcessingError(
                     f"{indic_error.message}\nLocal fallback also failed: "
                     f"{fallback_error.message}"
                 ) from fallback_error
-        for segment, translated in zip(segments, translations):
-            segment.translated_text = translated
-        return segments
 
     def _indictrans2(
         self,

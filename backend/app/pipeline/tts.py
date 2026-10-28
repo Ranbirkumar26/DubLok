@@ -9,18 +9,32 @@ from app.constants import SUPPORTED_LANGUAGES
 from app.errors import DependencyMissingError, ProcessingError
 
 RECOMMENDED_TTS_SPEAKERS = {
-    "hi": "Divya",
-    "en": "Thoma",
-    "ta": "Jaya",
-    "te": "Prakash",
-    "kn": "Suresh",
-    "ml": "Anjali",
-    "bn": "Aditi",
-    "mr": "Sunita",
+    "hi": {"female": "Divya", "male": "Rohit"},
+    "en": {"female": "Mary", "male": "Thoma"},
+    "ta": {"female": "Jaya"},
+    "te": {"female": "Lalitha", "male": "Prakash"},
+    "kn": {"female": "Anu", "male": "Suresh"},
+    "ml": {"female": "Anjali", "male": "Harish"},
+    "bn": {"female": "Aditi", "male": "Arjun"},
+    "mr": {"female": "Sunita", "male": "Sanjay"},
 }
+
+# Median F0 split between typical adult male and female speech.
+FEMALE_PITCH_HZ = 165.0
+
+MODEL_NAME = "ai4bharat/indic-parler-tts"
+
+
+def gender_from_pitch(median_pitch_hz: float | None) -> str | None:
+    if not median_pitch_hz:
+        return None
+    return "female" if median_pitch_hz >= FEMALE_PITCH_HZ else "male"
 
 
 class TTSEngine:
+    # Loaded once per worker process; loading Parler-TTS took ~50 s per segment.
+    _loaded: dict[tuple[str, str], tuple[object, object, object]] = {}
+
     def __init__(self, settings: Settings):
         self.settings = settings
 
@@ -31,12 +45,30 @@ class TTSEngine:
         language: str,
         voice: str | None,
         output_path: Path,
+        gender: str | None = None,
     ) -> None:
         output_path.parent.mkdir(parents=True, exist_ok=True)
         if self.settings.engine_mode == "demo":
             self._demo_tone(text, output_path)
             return
-        self._indic_parler(text=text, language=language, voice=voice, output_path=output_path)
+        self._indic_parler(
+            text=text, language=language, voice=voice, gender=gender, output_path=output_path
+        )
+
+    def _load(self, device: str) -> tuple[object, object, object]:
+        from parler_tts import ParlerTTSForConditionalGeneration
+        from transformers import AutoTokenizer
+
+        key = (MODEL_NAME, device)
+        if key not in self._loaded:
+            token = self.settings.huggingface_hub_token or None
+            model = ParlerTTSForConditionalGeneration.from_pretrained(MODEL_NAME, token=token).to(device)
+            tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME, token=token)
+            description_tokenizer = AutoTokenizer.from_pretrained(
+                model.config.text_encoder._name_or_path, token=token
+            )
+            TTSEngine._loaded[key] = (model, tokenizer, description_tokenizer)
+        return self._loaded[key]
 
     def _indic_parler(
         self,
@@ -44,35 +76,23 @@ class TTSEngine:
         text: str,
         language: str,
         voice: str | None,
+        gender: str | None,
         output_path: Path,
     ) -> None:
         self.settings.apply_model_environment()
         try:
             import soundfile as sf
             import torch
-            from parler_tts import ParlerTTSForConditionalGeneration
-            from transformers import AutoTokenizer
+            import parler_tts  # noqa: F401
         except ImportError as exc:
             raise DependencyMissingError(
                 "Indic Parler-TTS dependencies are missing. Run `pip install -r backend/requirements-ml.txt`."
             ) from exc
 
-        model_name = "ai4bharat/indic-parler-tts"
-        prompt = self._voice_description(language, voice)
+        prompt = self._voice_description(language, voice, gender)
         device = "cuda" if self.settings.device != "cpu" and torch.cuda.is_available() else "cpu"
         try:
-            model = ParlerTTSForConditionalGeneration.from_pretrained(
-                model_name,
-                token=self.settings.huggingface_hub_token or None,
-            ).to(device)
-            tokenizer = AutoTokenizer.from_pretrained(
-                model_name,
-                token=self.settings.huggingface_hub_token or None,
-            )
-            description_tokenizer = AutoTokenizer.from_pretrained(
-                model.config.text_encoder._name_or_path,
-                token=self.settings.huggingface_hub_token or None,
-            )
+            model, tokenizer, description_tokenizer = self._load(device)
             inputs = description_tokenizer(prompt, return_tensors="pt").to(device)
             prompt_inputs = tokenizer(text, return_tensors="pt").to(device)
             with torch.no_grad():
@@ -90,12 +110,15 @@ class TTSEngine:
                 f"and local runtime dependencies: {exc}"
             ) from exc
 
-    def _voice_description(self, language: str, voice: str | None) -> str:
+    def _voice_description(
+        self, language: str, voice: str | None, gender: str | None = None
+    ) -> str:
         requested_voice = (voice or "").strip()
         if requested_voice and (" " in requested_voice or "." in requested_voice):
             return requested_voice
 
-        speaker = requested_voice or RECOMMENDED_TTS_SPEAKERS.get(language)
+        speakers = RECOMMENDED_TTS_SPEAKERS.get(language, {})
+        speaker = requested_voice or speakers.get(gender or "female")
         if speaker:
             return (
                 f"{speaker}'s voice is clear and natural, with a moderate pace and pitch. "
@@ -103,8 +126,9 @@ class TTSEngine:
             )
 
         language_name = SUPPORTED_LANGUAGES.get(language, SUPPORTED_LANGUAGES["en"]).name
+        who = f"{gender} " if gender else ""
         return (
-            f"A native {language_name} speaker delivers clear, natural speech at a moderate pace "
+            f"A native {language_name} {who}speaker delivers clear, natural speech at a moderate pace "
             "and pitch. The recording is very clear audio, close-sounding, and has no background noise."
         )
 

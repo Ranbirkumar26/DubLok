@@ -4,6 +4,7 @@ import json
 import math
 import shutil
 import subprocess
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
@@ -175,16 +176,73 @@ def atempo_chain(ratio: float) -> str:
     return ",".join(f"atempo={part:.6f}" for part in parts)
 
 
-def fit_audio_to_segment(input_path: Path, output_path: Path, target_duration: float) -> None:
+MAX_SPEEDUP = 1.6
+# Mild slow-down is inaudible and fills more of the window; 0.46x sounded robotic.
+MIN_TEMPO = 0.85
+SILENCE_THRESHOLD = "-50dB"
+# Indic Parler-TTS output is bass-heavy (~65% energy in 100-300 Hz vs ~26% in real
+# speech). Tuning knob: this EQ moved the spectral centroid from ~1300 to ~1900 Hz.
+TTS_EQ = "equalizer=f=180:t=q:w=1:g=-5,equalizer=f=2500:t=q:w=1.5:g=4"
+
+
+def trim_silence(input_path: Path, output_path: Path) -> None:
+    """Drop leading/trailing silence and shorten internal pauses to 0.15 s."""
+    run_command(
+        [
+            "ffmpeg",
+            "-y",
+            "-i",
+            str(input_path),
+            "-af",
+            (
+                f"silenceremove=start_periods=1:start_threshold={SILENCE_THRESHOLD}:"
+                f"stop_periods=-1:stop_duration=0.3:stop_threshold={SILENCE_THRESHOLD}:"
+                "stop_silence=0.15"
+            ),
+            "-ar",
+            "44100",
+            "-ac",
+            "1",
+            str(output_path),
+        ]
+    )
+
+
+def fit_audio_to_segment(
+    input_path: Path,
+    output_path: Path,
+    target_duration: float,
+    *,
+    max_duration: float | None = None,
+    base_tempo: float = 1.0,
+    gain_db: float = 0.0,
+) -> None:
+    """Place speech in its window without slowing it down.
+
+    Speech shorter than the window keeps natural speed and is padded. Longer speech
+    may spill into the gap before the next segment (``max_duration``), and is only
+    sped up (capped at MAX_SPEEDUP) when it would overrun that gap.
+    """
     source_duration = audio_duration(input_path)
     if source_duration <= 0:
         create_silence(output_path, target_duration)
         return
-    ratio = source_duration / max(target_duration, 0.05)
+    available = max(target_duration, max_duration or target_duration)
+    tempo = max(base_tempo, 1.0)
+    if source_duration / tempo < target_duration:
+        tempo = max(source_duration / target_duration, MIN_TEMPO)
+    elif source_duration / tempo > available:
+        tempo = min(source_duration / available, MAX_SPEEDUP)
+    out_duration = min(max(source_duration / tempo, target_duration), available)
+    fade_out_start = max(0.0, out_duration - 0.03)
     filter_chain = (
-        f"{atempo_chain(ratio)},"
-        "loudnorm=I=-18:TP=-1.5:LRA=11,"
-        f"apad,atrim=0:{target_duration:.3f},asetpts=N/SR/TB"
+        f"{atempo_chain(tempo)},"
+        "highpass=f=70,"
+        f"{TTS_EQ},"
+        f"volume={gain_db:.2f}dB,"
+        "afade=t=in:d=0.01,"
+        f"apad,atrim=0:{out_duration:.3f},"
+        f"afade=t=out:st={fade_out_start:.3f}:d=0.03,asetpts=N/SR/TB"
     )
     run_command(
         [
@@ -243,6 +301,85 @@ def estimate_median_pitch_hz(
     return float(np.median(voiced_pitch))
 
 
+def active_speech_db(
+    audio_path: Path,
+    *,
+    start_seconds: float = 0.0,
+    duration_seconds: float | None = None,
+) -> float | None:
+    """Mean RMS (dBFS) of frames within 30 dB of the loudest frame, i.e. speech only."""
+    try:
+        import librosa
+        import numpy as np
+    except ImportError:
+        return None
+    try:
+        samples, _ = librosa.load(
+            str(audio_path),
+            sr=16000,
+            mono=True,
+            offset=max(0.0, start_seconds),
+            duration=duration_seconds,
+        )
+    except Exception:
+        return None
+    if samples.size < 1600:
+        return None
+    rms_db = 20 * np.log10(librosa.feature.rms(y=samples, frame_length=480, hop_length=160)[0] + 1e-6)
+    active = rms_db[rms_db > rms_db.max() - 30]
+    return float(active.mean()) if active.size else None
+
+
+def measure_loudness(path: Path) -> dict[str, str] | None:
+    """First loudnorm pass on channel 0; returns ffmpeg's measured_* values or None.
+
+    Uses `pan=mono|c0=c0` (no gain): the mono source and the dual-mono dub then compare
+    like for like. aformat/-ac downmix adds +3 dB to dual-mono, which left the dub ~3.5 dB
+    under the source.
+    """
+    try:
+        result = run_command(
+            [
+                "ffmpeg", "-hide_banner", "-i", str(path),
+                "-af", "pan=mono|c0=c0,loudnorm=print_format=json",
+                "-f", "null", "-",
+            ]
+        )
+    except ProcessingError:
+        return None
+    text = result.stderr
+    start = text.rfind("{")
+    if start < 0:
+        return None
+    try:
+        data = json.loads(text[start : text.rfind("}") + 1])
+    except json.JSONDecodeError:
+        return None
+    if not math.isfinite(float(data.get("input_i", "-inf"))):
+        return None
+    return data
+
+
+def normalize_loudness(input_path: Path, output_path: Path, target_lufs: float) -> None:
+    """Two-pass EBU R128 normalisation of the whole track (linear gain, no pumping)."""
+    target = clamp_float(target_lufs, -24.0, -14.0)
+    measured = measure_loudness(input_path)
+    loudnorm = f"loudnorm=I={target:.1f}:TP=-1.5:LRA=11"
+    if measured:
+        loudnorm += (
+            f":measured_I={measured['input_i']}:measured_TP={measured['input_tp']}"
+            f":measured_LRA={measured['input_lra']}:measured_thresh={measured['input_thresh']}"
+            f":offset={measured['target_offset']}:linear=true"
+        )
+    run_command(
+        [
+            "ffmpeg", "-y", "-i", str(input_path),
+            "-af", f"pan=mono|c0=c0,{loudnorm},pan=stereo|c0=c0|c1=c0",
+            "-ar", "44100", "-ac", "2", str(output_path),
+        ]
+    )
+
+
 def match_pitch_to_source(
     source_audio_path: Path,
     generated_audio_path: Path,
@@ -268,14 +405,28 @@ def match_pitch_to_source(
     return output_path
 
 
+@lru_cache
+def ffmpeg_has_filter(name: str) -> bool:
+    try:
+        result = run_command(["ffmpeg", "-hide_banner", "-filters"], timeout=30)
+    except (ProcessingError, OSError):
+        return False
+    return any(line.split()[1:2] == [name] for line in result.stdout.splitlines() if line.strip())
+
+
 def pitch_shift_audio(input_path: Path, output_path: Path, ratio: float) -> None:
-    sample_rate = audio_sample_rate(input_path)
-    shifted_rate = max(8000, int(round(sample_rate * clamp_float(ratio, 0.75, 1.35))))
-    filter_chain = (
-        f"asetrate={shifted_rate},"
-        f"aresample={sample_rate},"
-        f"{atempo_chain(sample_rate / shifted_rate)}"
-    )
+    ratio = clamp_float(ratio, 0.75, 1.35)
+    if ffmpeg_has_filter("rubberband"):
+        # Formant-preserving shift keeps timbre; asetrate moves formants (boomy/chipmunk).
+        filter_chain = f"rubberband=pitch={ratio:.6f}:formant=preserved"
+    else:
+        sample_rate = audio_sample_rate(input_path)
+        shifted_rate = max(8000, int(round(sample_rate * ratio)))
+        filter_chain = (
+            f"asetrate={shifted_rate},"
+            f"aresample={sample_rate},"
+            f"{atempo_chain(sample_rate / shifted_rate)}"
+        )
     run_command(
         [
             "ffmpeg",
@@ -315,7 +466,9 @@ def overlay_segments(
         )
         mix_inputs.append(f"[{label}]")
     filters.append(
-        f"{''.join(mix_inputs)}amix=inputs={len(segment_paths)}:duration=longest,"
+        # normalize=0: segments do not overlap, and amix's default 1/N scaling made the
+        # dub quiet and louder as earlier inputs ended.
+        f"{''.join(mix_inputs)}amix=inputs={len(segment_paths)}:duration=longest:normalize=0,"
         f"apad,atrim=0:{total_duration:.3f},asetpts=N/SR/TB[out]"
     )
     run_command(

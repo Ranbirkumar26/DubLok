@@ -56,3 +56,25 @@ def test_short_dialogue_fallback_keeps_continuous_segments() -> None:
     result = Diarizer(Settings())._short_dialogue_fallback(segments)
 
     assert [segment.speaker for segment in result] == ["Speaker 1", "Speaker 1"]
+
+
+def test_pause_heuristic_does_not_override_embedding_decision(monkeypatch) -> None:
+    diarizer = Diarizer(Settings(engine_mode="production"))
+    monkeypatch.setattr(diarizer, "_speechbrain_cluster", lambda _audio, segments: segments)
+
+    result = diarizer.assign_speakers(None, _segments())
+
+    assert [segment.speaker for segment in result] == ["Speaker 1", "Speaker 1"]
+
+
+def test_pause_heuristic_used_when_embeddings_fail(monkeypatch) -> None:
+    diarizer = Diarizer(Settings(engine_mode="production"))
+
+    def boom(_audio, _segments):
+        raise OSError("symlink privilege not held")
+
+    monkeypatch.setattr(diarizer, "_speechbrain_cluster", boom)
+
+    result = diarizer.assign_speakers(None, _segments())
+
+    assert [segment.speaker for segment in result] == ["Speaker 1", "Speaker 2"]

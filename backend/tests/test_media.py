@@ -36,22 +36,48 @@ def test_render_video_maps_generated_audio_only(monkeypatch, tmp_path) -> None:
     assert "0:a:0" not in maps
 
 
-def test_fit_audio_to_segment_trims_to_target(monkeypatch, tmp_path) -> None:
+def _fit_filter(monkeypatch, tmp_path, speech: float, target: float, **kwargs) -> str:
     calls: list[list[str]] = []
-
-    monkeypatch.setattr(media, "audio_duration", lambda _path: 2.0)
+    monkeypatch.setattr(media, "audio_duration", lambda _path: speech)
     monkeypatch.setattr(
         media,
         "run_command",
         lambda args, timeout=3600: calls.append(args)
         or subprocess.CompletedProcess(args, 0, "", ""),
     )
+    media.fit_audio_to_segment(tmp_path / "raw.wav", tmp_path / "fit.wav", target, **kwargs)
+    return calls[0][calls[0].index("-af") + 1]
 
-    media.fit_audio_to_segment(tmp_path / "raw.wav", tmp_path / "fit.wav", 1.25)
 
-    filter_chain = calls[0][calls[0].index("-af") + 1]
-    assert "loudnorm=I=-18:TP=-1.5:LRA=11" in filter_chain
-    assert "atrim=0:1.250" in filter_chain
+def test_fit_audio_speeds_up_long_speech_to_window(monkeypatch, tmp_path) -> None:
+    chain = _fit_filter(monkeypatch, tmp_path, 1.5, 1.25)
+
+    assert "atempo=1.200000" in chain
+    assert "atrim=0:1.250" in chain
+    assert "loudnorm" not in chain  # per-segment loudnorm caused level jumps
+
+
+def test_fit_audio_only_slows_short_speech_mildly(monkeypatch, tmp_path) -> None:
+    chain = _fit_filter(monkeypatch, tmp_path, 3.6, 7.74)
+
+    assert f"atempo={media.MIN_TEMPO:.6f}" in chain  # not 0.46x
+    assert "atrim=0:7.740" in chain
+
+
+def test_fit_audio_spills_into_gap_before_speeding_up(monkeypatch, tmp_path) -> None:
+    chain = _fit_filter(monkeypatch, tmp_path, 4.0, 3.3, max_duration=4.04)
+
+    assert "atempo=1.000000" in chain
+    assert "atrim=0:4.000" in chain
+
+
+def test_fit_audio_caps_speedup_and_fades(monkeypatch, tmp_path) -> None:
+    chain = _fit_filter(monkeypatch, tmp_path, 10.0, 3.0, gain_db=4.5)
+
+    assert f"atempo={media.MAX_SPEEDUP:.6f}" in chain
+    assert "atrim=0:3.000" in chain
+    assert "volume=4.50dB" in chain
+    assert "afade=t=out:st=2.970" in chain
 
 
 def test_match_pitch_to_source_shifts_generated_audio(monkeypatch, tmp_path) -> None:
@@ -65,6 +91,7 @@ def test_match_pitch_to_source_shifts_generated_audio(monkeypatch, tmp_path) -> 
 
     monkeypatch.setattr(media, "estimate_median_pitch_hz", fake_pitch)
     monkeypatch.setattr(media, "audio_sample_rate", lambda _path: 44100)
+    monkeypatch.setattr(media, "ffmpeg_has_filter", lambda _name: False)
     monkeypatch.setattr(
         media,
         "run_command",
@@ -84,6 +111,21 @@ def test_match_pitch_to_source_shifts_generated_audio(monkeypatch, tmp_path) -> 
     filter_chain = calls[0][calls[0].index("-af") + 1]
     assert "asetrate=52920" in filter_chain
     assert "atempo=0.833333" in filter_chain
+
+
+def test_pitch_shift_prefers_formant_preserving_rubberband(monkeypatch, tmp_path) -> None:
+    calls: list[list[str]] = []
+    monkeypatch.setattr(media, "ffmpeg_has_filter", lambda name: name == "rubberband")
+    monkeypatch.setattr(
+        media,
+        "run_command",
+        lambda args, timeout=3600: calls.append(args)
+        or subprocess.CompletedProcess(args, 0, "", ""),
+    )
+
+    media.pitch_shift_audio(tmp_path / "in.wav", tmp_path / "out.wav", 1.2)
+
+    assert calls[0][calls[0].index("-af") + 1] == "rubberband=pitch=1.200000:formant=preserved"
 
 
 def test_match_pitch_to_source_skips_when_pitch_is_missing(monkeypatch, tmp_path) -> None:
@@ -115,6 +157,8 @@ def test_overlay_segments_pads_to_total_duration(monkeypatch, tmp_path) -> None:
 
     filter_complex = calls[0][calls[0].index("-filter_complex") + 1]
     assert "apad,atrim=0:4.000" in filter_complex
+    # amix's default 1/N scaling made the dub quiet and drift louder over time.
+    assert "normalize=0" in filter_complex
 
 
 def test_mix_tracks_pads_full_replacement_to_duration(monkeypatch, tmp_path) -> None:
@@ -164,3 +208,28 @@ def test_verify_render_timing_rejects_short_audio(monkeypatch, tmp_path) -> None
 
     with pytest.raises(media.ProcessingError, match="does not match"):
         media.verify_render_timing(5.0, audio_path, output_path, tolerance=0.25)
+
+
+def test_normalize_loudness_compares_mono_without_downmix_gain(monkeypatch, tmp_path) -> None:
+    calls: list[list[str]] = []
+    monkeypatch.setattr(
+        media,
+        "measure_loudness",
+        lambda _path: {
+            "input_i": "-21.0", "input_tp": "-2.0", "input_lra": "5.0",
+            "input_thresh": "-31.0", "target_offset": "0.1",
+        },
+    )
+    monkeypatch.setattr(
+        media,
+        "run_command",
+        lambda args, timeout=3600: calls.append(args)
+        or subprocess.CompletedProcess(args, 0, "", ""),
+    )
+
+    media.normalize_loudness(tmp_path / "mix.wav", tmp_path / "final.wav", -17.2)
+
+    chain = calls[0][calls[0].index("-af") + 1]
+    assert chain.startswith("pan=mono|c0=c0,loudnorm=I=-17.2")
+    assert "measured_I=-21.0" in chain and "linear=true" in chain
+    assert chain.endswith("pan=stereo|c0=c0|c1=c0")
