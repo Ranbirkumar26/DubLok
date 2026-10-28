@@ -1,0 +1,58 @@
+from __future__ import annotations
+
+import numpy as np
+
+from app.pipeline.diarization import assign_two_segment_speakers
+from app.pipeline.diarization import Diarizer
+from app.pipeline.types import Segment
+from app.config import Settings
+
+
+def _segments() -> list[Segment]:
+    return [
+        Segment(id="seg_0001", speaker="Speaker 1", start=0.0, end=1.0, text="Question"),
+        Segment(id="seg_0002", speaker="Speaker 1", start=1.5, end=2.5, text="Answer"),
+    ]
+
+
+def test_two_segment_diarization_splits_different_embeddings() -> None:
+    segments = _segments()
+
+    assign_two_segment_speakers(
+        segments,
+        [0, 1],
+        [np.array([1.0, 0.0]), np.array([0.0, 1.0])],
+    )
+
+    assert [segment.speaker for segment in segments] == ["Speaker 1", "Speaker 2"]
+
+
+def test_two_segment_diarization_keeps_similar_embeddings() -> None:
+    segments = _segments()
+
+    assign_two_segment_speakers(
+        segments,
+        [0, 1],
+        [np.array([1.0, 0.0]), np.array([0.99, 0.01])],
+    )
+
+    assert [segment.speaker for segment in segments] == ["Speaker 1", "Speaker 1"]
+
+
+def test_short_dialogue_fallback_splits_two_paused_turns() -> None:
+    segments = _segments()
+
+    result = Diarizer(Settings())._short_dialogue_fallback(segments)
+
+    assert [segment.speaker for segment in result] == ["Speaker 1", "Speaker 2"]
+
+
+def test_short_dialogue_fallback_keeps_continuous_segments() -> None:
+    segments = [
+        Segment(id="seg_0001", speaker="Speaker 1", start=0.0, end=1.0, text="First"),
+        Segment(id="seg_0002", speaker="Speaker 1", start=1.1, end=2.0, text="Second"),
+    ]
+
+    result = Diarizer(Settings())._short_dialogue_fallback(segments)
+
+    assert [segment.speaker for segment in result] == ["Speaker 1", "Speaker 1"]

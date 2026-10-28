@@ -37,7 +37,8 @@ function Clear-LogFile($path) {
             return
         } catch {
             if ($attempt -eq 10) {
-                throw
+                Write-Warning "Could not clear log file $path because it is still locked; continuing."
+                return
             }
             Start-Sleep -Milliseconds 300
         }
@@ -96,9 +97,9 @@ Get-CimInstance Win32_Process |
             $_.CommandLine -like "*uvicorn*app.main:app*" -or
             $_.CommandLine -like "*-m app.worker*" -or
             $_.CommandLine -like "*vite*--host 127.0.0.1*" -or
-            $_.CommandLine -like "*storage\logs\api.log*" -or
-            $_.CommandLine -like "*storage\logs\worker.log*" -or
-            $_.CommandLine -like "*storage\logs\frontend.log*"
+            $_.CommandLine -like "*api.log*" -or
+            $_.CommandLine -like "*worker.log*" -or
+            $_.CommandLine -like "*frontend.log*"
         )
     } |
     ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }

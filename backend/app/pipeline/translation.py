@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 from app.config import Settings
 from app.constants import SUPPORTED_LANGUAGES
 from app.errors import DependencyMissingError, ProcessingError, ValidationError
@@ -12,6 +14,10 @@ MODEL_BY_DIRECTION = {
 }
 
 NLLB_FALLBACK_MODEL = "facebook/nllb-200-distilled-600M"
+PAIR_FALLBACK_MODELS = {
+    ("en", "hi"): "Helsinki-NLP/opus-mt-en-hi",
+    ("hi", "en"): "Helsinki-NLP/opus-mt-hi-en",
+}
 
 
 class Translator:
@@ -54,14 +60,20 @@ class Translator:
                 segment.translated_text = f"[{target_name}] {segment.text}"
             return segments
         texts = [segment.text for segment in segments]
+        model_name = MODEL_BY_DIRECTION[self._direction(source_language, target_language)]
+        if not self._model_is_cached(model_name):
+            translations = self._fallback_translate(texts, source_language, target_language)
+            for segment, translated in zip(segments, translations):
+                segment.translated_text = translated
+            return segments
         try:
             translations = self._indictrans2(texts, source_language, target_language)
         except ProcessingError as indic_error:
             try:
-                translations = self._nllb(texts, source_language, target_language)
+                translations = self._fallback_translate(texts, source_language, target_language)
             except ProcessingError as fallback_error:
                 raise ProcessingError(
-                    f"{indic_error.message}\nNLLB fallback also failed: "
+                    f"{indic_error.message}\nLocal fallback also failed: "
                     f"{fallback_error.message}"
                 ) from fallback_error
         for segment, translated in zip(segments, translations):
@@ -185,6 +197,62 @@ class Translator:
             ]
         except Exception as exc:  # pragma: no cover - depends on local model/runtime
             raise ProcessingError(f"NLLB fallback translation failed: {exc}") from exc
+
+    def _fallback_translate(
+        self,
+        texts: list[str],
+        source_language: str,
+        target_language: str,
+    ) -> list[str]:
+        pair_model = PAIR_FALLBACK_MODELS.get((source_language, target_language))
+        if pair_model:
+            try:
+                return self._plain_seq2seq(texts, pair_model)
+            except ProcessingError:
+                pass
+        return self._nllb(texts, source_language, target_language)
+
+    def _plain_seq2seq(self, texts: list[str], model_name: str) -> list[str]:
+        self.settings.apply_model_environment()
+        try:
+            import torch
+            from transformers import AutoModelForSeq2SeqLM, AutoTokenizer
+        except ImportError as exc:
+            raise DependencyMissingError(
+                "Translation fallback dependencies are missing. Run `pip install -r backend/requirements-ml.txt`."
+            ) from exc
+
+        device = self._torch_device(torch)
+        try:
+            tokenizer = AutoTokenizer.from_pretrained(
+                model_name,
+                token=self.settings.huggingface_hub_token or None,
+            )
+            model = AutoModelForSeq2SeqLM.from_pretrained(
+                model_name,
+                token=self.settings.huggingface_hub_token or None,
+            ).to(device)
+            encoded = tokenizer(
+                texts,
+                return_tensors="pt",
+                padding=True,
+                truncation=True,
+                max_length=512,
+            )
+            encoded = {key: value.to(device) for key, value in encoded.items()}
+            with torch.no_grad():
+                output = model.generate(**encoded, max_new_tokens=256, num_beams=4)
+            return [
+                item.strip()
+                for item in tokenizer.batch_decode(output, skip_special_tokens=True)
+            ]
+        except Exception as exc:  # pragma: no cover - depends on local model/runtime
+            raise ProcessingError(f"Pair fallback translation failed: {exc}") from exc
+
+    def _model_is_cached(self, model_name: str) -> bool:
+        cache_dir = Path(self.settings.hf_home) / "hub" / f"models--{model_name.replace('/', '--')}"
+        snapshots_dir = cache_dir / "snapshots"
+        return snapshots_dir.exists() and any(snapshots_dir.iterdir())
 
     def _torch_device(self, torch_module: object) -> str:
         if self.settings.device == "cpu":
