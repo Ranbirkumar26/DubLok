@@ -11,6 +11,21 @@ logger = logging.getLogger(__name__)
 # ECAPA cosine distance: one speaker's turns measured up to ~0.42 on short clips,
 # two different speakers ~0.94. 0.18 split single speakers.
 SPEAKER_DISTANCE_THRESHOLD = 0.5
+# Embeddings of clips under ~1.5 s are unreliable (a 1.2 s line of one speaker was labelled as a
+# second speaker), so shorter segments take the voice of the nearest longer neighbour instead.
+MIN_EMBED_SECONDS = 1.5
+
+
+def inherit_short_segment_speakers(segments: list[Segment], usable_indices: list[int]) -> None:
+    usable = set(usable_indices)
+    for index, segment in enumerate(segments):
+        if index in usable:
+            continue
+        before = [i for i in usable_indices if i < index]
+        after = [i for i in usable_indices if i > index]
+        source = before[-1] if before else (after[0] if after else None)
+        if source is not None:
+            segment.speaker = segments[source].speaker
 
 
 def assign_two_segment_speakers(
@@ -75,7 +90,7 @@ class Diarizer:
         for index, segment in enumerate(segments):
             start = max(0, int(segment.start * sample_rate))
             end = min(signal.shape[1], int(segment.end * sample_rate))
-            if end - start < sample_rate // 2:
+            if end - start < sample_rate * MIN_EMBED_SECONDS:
                 continue
             clip = signal[:, start:end]
             with torch.no_grad():
@@ -87,6 +102,7 @@ class Diarizer:
             return segments
         if len(embeddings) == 2:
             assign_two_segment_speakers(segments, usable_indices, embeddings)
+            inherit_short_segment_speakers(segments, usable_indices)
             return segments
 
         # Cluster by voice distance instead of forcing a speaker count, so a
@@ -101,6 +117,7 @@ class Diarizer:
         for segment_index, label in zip(usable_indices, labels):
             number = numbering.setdefault(int(label), len(numbering) + 1)
             segments[segment_index].speaker = f"Speaker {number}"
+        inherit_short_segment_speakers(segments, usable_indices)
         return segments
 
     def _short_dialogue_fallback(self, segments: list[Segment]) -> list[Segment]:

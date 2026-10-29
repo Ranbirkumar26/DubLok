@@ -78,3 +78,17 @@ def test_pause_heuristic_used_when_embeddings_fail(monkeypatch) -> None:
     result = diarizer.assign_speakers(None, _segments())
 
     assert [segment.speaker for segment in result] == ["Speaker 1", "Speaker 2"]
+
+
+def test_short_segments_inherit_the_nearest_longer_speaker() -> None:
+    from app.pipeline.diarization import inherit_short_segment_speakers
+
+    segments = [
+        Segment(id="a", speaker="Speaker 1", start=0, end=4, text="x"),
+        Segment(id="b", speaker="Speaker 1", start=4, end=5, text="y"),
+        Segment(id="c", speaker="Speaker 2", start=5, end=9, text="z"),
+        Segment(id="d", speaker="Speaker 1", start=9, end=10, text="w"),
+    ]
+    inherit_short_segment_speakers(segments, [0, 2])
+
+    assert [segment.speaker for segment in segments] == ["Speaker 1", "Speaker 1", "Speaker 2", "Speaker 2"]
