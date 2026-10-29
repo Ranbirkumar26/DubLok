@@ -60,3 +60,22 @@ def test_tts_accepts_full_custom_voice_description(tmp_path) -> None:
     custom = "Rohit's voice is expressive and close-sounding."
 
     assert engine._voice_description("hi", custom) == custom
+
+
+def test_plausible_speech_rate_rejects_looping_and_truncated_takes() -> None:
+    from app.pipeline.tts import plausible_speech_rate
+
+    text = "आप एक पल है जहां आप आगे जा सकते हैं"  # 29 characters without spaces
+    assert plausible_speech_rate(text, 3.0)
+    assert not plausible_speech_rate(text, 9.0)  # looped or stuttering take
+    assert not plausible_speech_rate(text, 0.8)  # cut-off take
+
+
+def test_adds_stutter_flags_unscripted_repeats_only() -> None:
+    from app.pipeline.tts import adds_stutter
+
+    script = "आप एक पल है जहां आप आगे जा सकते हैं"
+    assert adds_stutter(script, "आप एक पल है, जहाँ आप आप आगे जा सकते हैं")
+    assert not adds_stutter(script, "आप एक पल है, जहाँ आप आगे जा सकते हैं")
+    assert not adds_stutter("वह धीरे धीरे चला", "वह धीरे धीरे चला")  # scripted reduplication
+    assert not adds_stutter(script, "")  # no check available

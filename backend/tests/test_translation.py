@@ -126,3 +126,25 @@ def test_translation_translates_each_sentence_and_rejoins(monkeypatch) -> None:
     assert seen == [["body has a turn back moment.", "You can go forward?", "Never quit"]]
     assert first.translated_text == "<body has a turn back moment.> <You can go forward?>"
     assert second.translated_text == "<Never quit>"
+
+
+def test_fallback_prefers_cached_nllb_over_pair_model(monkeypatch) -> None:
+    translator = Translator(Settings(engine_mode="production"))
+    used: list[str] = []
+
+    monkeypatch.setattr(
+        translator, "_model_is_cached", lambda name: name.endswith("distilled-1.3B")
+    )
+    monkeypatch.setattr(
+        translator,
+        "_nllb",
+        lambda texts, _s, _t, model_name="": used.append(model_name) or ["ok"] * len(texts),
+    )
+    monkeypatch.setattr(
+        translator,
+        "_plain_seq2seq",
+        lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("pair model should not run")),
+    )
+
+    assert translator._fallback_translate(["Hello"], "en", "hi") == ["ok"]
+    assert used == ["facebook/nllb-200-distilled-1.3B"]

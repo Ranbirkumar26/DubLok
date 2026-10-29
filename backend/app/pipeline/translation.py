@@ -6,7 +6,7 @@ from pathlib import Path
 from app.config import Settings
 from app.constants import SUPPORTED_LANGUAGES
 from app.errors import DependencyMissingError, ProcessingError, ValidationError
-from app.pipeline.types import Segment, transcript_payload
+from app.pipeline.types import Segment, collapse_repeated_words, split_sentences, transcript_payload
 
 MODEL_BY_DIRECTION = {
     "en_to_indic": "ai4bharat/indictrans2-en-indic-1B",
@@ -15,13 +15,8 @@ MODEL_BY_DIRECTION = {
 }
 
 NLLB_FALLBACK_MODEL = "facebook/nllb-200-distilled-600M"
-
-_SENTENCE_BOUNDARY = re.compile(r"(?<=[.?!।])\s+")
-
-
-def split_sentences(text: str) -> list[str]:
-    return [part.strip() for part in _SENTENCE_BOUNDARY.split(text) if part.strip()]
-
+# Best first: the 1.3B model translates Hindi clearly better than the 600M and pair models.
+NLLB_MODELS = ("facebook/nllb-200-distilled-1.3B", NLLB_FALLBACK_MODEL)
 
 PAIR_FALLBACK_MODELS = {
     ("en", "hi"): "Helsinki-NLP/opus-mt-en-hi",
@@ -77,7 +72,9 @@ class Translator:
         for segment, sentences in zip(segments, sentence_lists):
             parts = translations[position : position + len(sentences)]
             position += len(sentences)
-            segment.translated_text = " ".join(part for part in parts if part).strip()
+            segment.translated_text = collapse_repeated_words(
+                " ".join(part for part in parts if part).strip()
+            )
         return segments
 
     def _translate_texts(
@@ -174,6 +171,7 @@ class Translator:
         texts: list[str],
         source_language: str,
         target_language: str,
+        model_name: str = NLLB_FALLBACK_MODEL,
     ) -> list[str]:
         self.settings.apply_model_environment()
         try:
@@ -189,12 +187,13 @@ class Translator:
         device = self._torch_device(torch)
         try:
             tokenizer = AutoTokenizer.from_pretrained(
-                NLLB_FALLBACK_MODEL,
+                model_name,
                 token=self.settings.huggingface_hub_token or None,
             )
             model = AutoModelForSeq2SeqLM.from_pretrained(
-                NLLB_FALLBACK_MODEL,
+                model_name,
                 token=self.settings.huggingface_hub_token or None,
+                torch_dtype=torch.float16 if device == "cuda" else torch.float32,
             ).to(device)
             tokenizer.src_lang = source_tag
             encoded = tokenizer(
@@ -213,10 +212,14 @@ class Translator:
                     max_new_tokens=256,
                     num_beams=4,
                 )
-            return [
+            decoded = [
                 item.strip()
                 for item in tokenizer.batch_decode(output, skip_special_tokens=True)
             ]
+            del model  # leave the GPU free for the TTS model
+            if device == "cuda":
+                torch.cuda.empty_cache()
+            return decoded
         except Exception as exc:  # pragma: no cover - depends on local model/runtime
             raise ProcessingError(f"NLLB fallback translation failed: {exc}") from exc
 
@@ -226,6 +229,12 @@ class Translator:
         source_language: str,
         target_language: str,
     ) -> list[str]:
+        for nllb_model in NLLB_MODELS:
+            if self._model_is_cached(nllb_model):
+                try:
+                    return self._nllb(texts, source_language, target_language, nllb_model)
+                except ProcessingError:
+                    pass
         pair_model = PAIR_FALLBACK_MODELS.get((source_language, target_language))
         if pair_model:
             try:
@@ -274,7 +283,10 @@ class Translator:
     def _model_is_cached(self, model_name: str) -> bool:
         cache_dir = Path(self.settings.hf_home) / "hub" / f"models--{model_name.replace('/', '--')}"
         snapshots_dir = cache_dir / "snapshots"
-        return snapshots_dir.exists() and any(snapshots_dir.iterdir())
+        # Snapshot links appear only once a file is fully downloaded; require the weights.
+        return snapshots_dir.exists() and any(
+            path.suffix in (".bin", ".safetensors") for path in snapshots_dir.glob("*/*")
+        )
 
     def _torch_device(self, torch_module: object) -> str:
         if self.settings.device == "cpu":

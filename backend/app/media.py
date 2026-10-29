@@ -180,6 +180,8 @@ MAX_SPEEDUP = 1.6
 # Mild slow-down is inaudible and fills more of the window; 0.46x sounded robotic.
 MIN_TEMPO = 0.85
 SILENCE_THRESHOLD = "-50dB"
+# Quiet plosive onsets (e.g. the "k" of "kya") sit near the threshold; keep a little lead-in.
+ONSET_PAD_SECONDS = 0.05
 # Indic Parler-TTS output is bass-heavy (~65% energy in 100-300 Hz vs ~26% in real
 # speech). Tuning knob: this EQ moved the spectral centroid from ~1300 to ~1900 Hz.
 TTS_EQ = "equalizer=f=180:t=q:w=1:g=-5,equalizer=f=2500:t=q:w=1.5:g=4"
@@ -196,6 +198,7 @@ def trim_silence(input_path: Path, output_path: Path) -> None:
             "-af",
             (
                 f"silenceremove=start_periods=1:start_threshold={SILENCE_THRESHOLD}:"
+                f"start_silence={ONSET_PAD_SECONDS}:"
                 f"stop_periods=-1:stop_duration=0.3:stop_threshold={SILENCE_THRESHOLD}:"
                 "stop_silence=0.15"
             ),
@@ -206,6 +209,34 @@ def trim_silence(input_path: Path, output_path: Path) -> None:
             str(output_path),
         ]
     )
+
+
+def plan_piece_slots(
+    naturals: list[float], start: float, duration: float, available: float
+) -> list[tuple[float, float]]:
+    """Place the sentences of one segment as (start, slot) pairs with one shared pace.
+
+    All sentences are slowed (>= MIN_TEMPO) to fill the window, or sped up (<= MAX_SPEEDUP)
+    when they overrun it; leftover time becomes pauses between sentences, not dead air at the end.
+    ``available`` is the window plus the gap before the next segment, usable only when overrunning.
+    """
+    total = sum(naturals)
+    if total <= 0:
+        return [(start, duration)]
+    if total < duration:
+        tempo = max(total / duration, MIN_TEMPO)
+    elif total > max(duration, available):
+        tempo = min(total / available, MAX_SPEEDUP)
+    else:
+        tempo = 1.0
+    slack = max(0.0, duration - total / tempo)
+    slots: list[tuple[float, float]] = []
+    cursor = start
+    for natural in naturals:
+        slot = natural / tempo + slack * natural / total
+        slots.append((cursor, slot))
+        cursor += slot
+    return slots
 
 
 def fit_audio_to_segment(
@@ -240,7 +271,7 @@ def fit_audio_to_segment(
         "highpass=f=70,"
         f"{TTS_EQ},"
         f"volume={gain_db:.2f}dB,"
-        "afade=t=in:d=0.01,"
+        "afade=t=in:d=0.005,"
         f"apad,atrim=0:{out_duration:.3f},"
         f"afade=t=out:st={fade_out_start:.3f}:d=0.03,asetpts=N/SR/TB"
     )

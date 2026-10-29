@@ -233,3 +233,28 @@ def test_normalize_loudness_compares_mono_without_downmix_gain(monkeypatch, tmp_
     assert chain.startswith("pan=mono|c0=c0,loudnorm=I=-17.2")
     assert "measured_I=-21.0" in chain and "linear=true" in chain
     assert chain.endswith("pan=stereo|c0=c0|c1=c0")
+
+
+def test_plan_piece_slots_spreads_slack_between_sentences() -> None:
+    # 3 s + 1 s of speech in a 10 s window: slowed to MIN_TEMPO, rest becomes pauses.
+    slots = media.plan_piece_slots([3.0, 1.0], 5.0, 10.0, 10.0)
+
+    assert slots[0][0] == 5.0
+    assert abs(slots[1][0] - (5.0 + slots[0][1])) < 1e-9
+    assert abs(sum(slot for _, slot in slots) - 10.0) < 1e-9
+    assert slots[0][1] > 3.0 / media.MIN_TEMPO  # includes its share of the pauses
+
+
+def test_plan_piece_slots_speeds_up_overrun_and_single_piece_is_unchanged() -> None:
+    fast = media.plan_piece_slots([6.0, 6.0], 0.0, 6.0, 6.0)
+    assert abs(sum(slot for _, slot in fast) - 12.0 / media.MAX_SPEEDUP) < 1e-9
+    assert media.plan_piece_slots([4.0], 2.0, 4.0, 4.0) == [(2.0, 4.0)]
+
+
+def test_trim_silence_keeps_onset_padding(monkeypatch, tmp_path) -> None:
+    calls: list[list[str]] = []
+    monkeypatch.setattr(media, "run_command", lambda args, timeout=3600: calls.append(args))
+
+    media.trim_silence(tmp_path / "a.wav", tmp_path / "b.wav")
+
+    assert f"start_silence={media.ONSET_PAD_SECONDS}" in calls[0][calls[0].index("-af") + 1]

@@ -10,6 +10,7 @@ from app.db import Database
 from app.errors import AppError, ProcessingError, ValidationError
 from app.media import (
     active_speech_db,
+    audio_duration,
     clamp_float,
     estimate_median_pitch_hz,
     extract_audio,
@@ -19,6 +20,7 @@ from app.media import (
     mix_tracks,
     normalize_loudness,
     overlay_segments,
+    plan_piece_slots,
     probe_video,
     render_video,
     trim_silence,
@@ -35,6 +37,7 @@ from app.pipeline.types import (
     Segment,
     merge_sentence_fragments,
     segments_from_payload,
+    speech_pieces,
     transcript_payload,
 )
 from app.storage import copy_to_job_input, job_dir
@@ -192,59 +195,75 @@ class PipelineRunner:
 
         fitted_paths: list[tuple[Path, float]] = []
         for index, segment in enumerate(segments, start=1):
-            text = (segment.translated_text or "").strip()
-            raw_path = work_dir / "tts" / f"{segment.id}_raw.wav"
-            trim_path = work_dir / "tts" / f"{segment.id}_trim.wav"
-            pitch_path = work_dir / "tts" / f"{segment.id}_pitch.wav"
-            fit_path = work_dir / "tts" / f"{segment.id}_fit.wav"
+            pieces = speech_pieces((segment.translated_text or "").strip())
             voice = job["voice_map"].get(segment.speaker)
-            self._stage(
-                job,
-                f"generating translated speech {index}/{len(segments)}",
-                60 + min(20, index / max(len(segments), 1) * 20),
-                lambda text=text, raw_path=raw_path, voice=voice, segment=segment: tts.synthesize(
-                    text=text,
-                    language=job["target_language"],
-                    voice=voice,
-                    gender=speaker_genders.get(segment.speaker),
-                    output_path=raw_path,
-                ),
-            )
-            trim_silence(raw_path, trim_path)
-            sync_input = trim_path
-            gain_db = 0.0
-            if has_source:
-                sync_input = self._stage(
+            prepared: list[tuple[Path, float]] = []
+            for part, text in enumerate(pieces, start=1):
+                stem = f"{segment.id}_{part}"
+                raw_path = work_dir / "tts" / f"{stem}_raw.wav"
+                trim_path = work_dir / "tts" / f"{stem}_trim.wav"
+                pitch_path = work_dir / "tts" / f"{stem}_pitch.wav"
+                label = f"{index}/{len(segments)}" + (f".{part}" if len(pieces) > 1 else "")
+                self._stage(
                     job,
-                    f"matching pitch {index}/{len(segments)}",
-                    80,
-                    lambda trim_path=trim_path, pitch_path=pitch_path, segment=segment: (
-                        match_pitch_to_source(
+                    f"generating translated speech {label}",
+                    60 + min(20, index / max(len(segments), 1) * 20),
+                    lambda text=text, raw_path=raw_path: tts.synthesize(
+                        text=text,
+                        language=job["target_language"],
+                        voice=voice,
+                        gender=speaker_genders.get(segment.speaker),
+                        output_path=raw_path,
+                    ),
+                )
+                trim_silence(raw_path, trim_path)
+                sync_input = trim_path
+                gain_db = 0.0
+                if has_source:
+                    sync_input = self._stage(
+                        job,
+                        f"matching pitch {label}",
+                        80,
+                        lambda trim_path=trim_path, pitch_path=pitch_path: match_pitch_to_source(
                             source_audio,
                             trim_path,
                             pitch_path,
                             source_start=segment.start,
                             source_duration=segment.duration,
-                        )
+                        ),
+                    )
+                    gain_db = self._segment_gain_db(source_audio, sync_input, segment)
+                prepared.append((sync_input, gain_db))
+            next_start = segments[index].start if index < len(segments) else duration
+            available = max(segment.duration, next_start - segment.start)
+            slots = plan_piece_slots(
+                [audio_duration(path) for path, _ in prepared],
+                segment.start,
+                segment.duration,
+                available,
+            )
+            for part, ((sync_input, gain_db), (slot_start, slot)) in enumerate(
+                zip(prepared, slots), start=1
+            ):
+                fit_path = work_dir / "tts" / f"{segment.id}_{part}_fit.wav"
+                is_last = part == len(prepared)
+                # Only the last sentence may spill into the gap before the next segment.
+                spill = (segment.start + available - slot_start) if is_last else slot
+                self._stage(
+                    job,
+                    "synchronizing audio",
+                    82,
+                    lambda sync_input=sync_input, fit_path=fit_path, slot=slot, spill=spill,
+                    gain_db=gain_db: fit_audio_to_segment(
+                        sync_input,
+                        fit_path,
+                        slot,
+                        max_duration=max(slot, spill),
+                        base_tempo=float(job["speech_speed"]),
+                        gain_db=gain_db,
                     ),
                 )
-                gain_db = self._segment_gain_db(source_audio, sync_input, segment)
-            next_start = segments[index].start if index < len(segments) else duration
-            self._stage(
-                job,
-                "synchronizing audio",
-                82,
-                lambda sync_input=sync_input, fit_path=fit_path, segment=segment,
-                next_start=next_start, gain_db=gain_db: fit_audio_to_segment(
-                    sync_input,
-                    fit_path,
-                    segment.duration,
-                    max_duration=max(segment.duration, next_start - segment.start),
-                    base_tempo=float(job["speech_speed"]),
-                    gain_db=gain_db,
-                ),
-            )
-            fitted_paths.append((fit_path, segment.start))
+                fitted_paths.append((fit_path, slot_start))
 
         dubbed_track = work_dir / "audio" / "dubbed_segments.wav"
         self._stage(

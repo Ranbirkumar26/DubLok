@@ -36,3 +36,21 @@ def test_merge_keeps_speaker_changes_and_long_gaps() -> None:
     )
 
     assert len(merged) == 3
+
+
+def test_speech_pieces_split_sentences_and_merge_fragments() -> None:
+    from app.pipeline.types import speech_pieces
+
+    assert speech_pieces("पहला वाक्य यहाँ है. दूसरा वाक्य भी है।") == [
+        "पहला वाक्य यहाँ है.",
+        "दूसरा वाक्य भी है।",
+    ]
+    assert speech_pieces("यह एक लंबा वाक्य है. हाँ.") == ["यह एक लंबा वाक्य है. हाँ."]
+    assert speech_pieces("") == []
+
+
+def test_collapse_repeated_words_keeps_reduplication() -> None:
+    from app.pipeline.types import collapse_repeated_words
+
+    assert collapse_repeated_words("आप आप आप जा सकते हैं") == "आप जा सकते हैं"
+    assert collapse_repeated_words("वह धीरे धीरे चला") == "वह धीरे धीरे चला"
