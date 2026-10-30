@@ -130,6 +130,8 @@ class PipelineRunner:
         def diarize() -> dict[str, Any]:
             segments = segments_from_payload(transcript)
             assigned = Diarizer(self.settings).assign_speakers(audio_path, segments)
+            for segment in assigned:
+                segment.words = None
             return transcript_payload(
                 segments=merge_sentence_fragments(assigned),
                 detected_language=transcript.get("detected_language"),

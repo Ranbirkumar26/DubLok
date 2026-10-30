@@ -51,6 +51,7 @@ class TranscriptSegment(BaseModel):
     end: float = Field(ge=0)
     text: str
     translated_text: str | None = None
+    overlap: bool = False
 
     @field_validator("end")
     @classmethod

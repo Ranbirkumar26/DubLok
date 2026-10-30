@@ -125,6 +125,11 @@ class Transcriber:
                     start=float(raw.start),
                     end=float(raw.end),
                     text=text,
+                    words=[
+                        {"start": float(w.start), "end": float(w.end), "word": w.word}
+                        for w in (getattr(raw, "words", None) or [])
+                    ]
+                    or None,
                 )
             )
         if not segments:

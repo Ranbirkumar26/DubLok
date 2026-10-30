@@ -13,6 +13,8 @@ class Segment:
     end: float
     text: str
     translated_text: str | None = None
+    overlap: bool = False
+    words: list[dict[str, Any]] | None = None
 
     @property
     def duration(self) -> float:
@@ -34,6 +36,8 @@ class Segment:
                 if data.get("translated_text") is None
                 else str(data.get("translated_text"))
             ),
+            overlap=bool(data.get("overlap", False)),
+            words=data.get("words") or None,
         )
 
 
@@ -84,6 +88,8 @@ def merge_sentence_fragments(
             and segment.end - previous.start <= max_duration
         ):
             previous.end = segment.end
+            previous.overlap = previous.overlap or segment.overlap
+            previous.words = None
             previous.text = f"{previous.text.rstrip()} {segment.text.lstrip()}"
             continue
         merged.append(Segment.from_dict(segment.to_dict()))

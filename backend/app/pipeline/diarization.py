@@ -47,6 +47,92 @@ def assign_two_segment_speakers(
             segments[segment_index].speaker = f"Speaker {speaker_number}"
 
 
+Turn = tuple[float, float, str]
+PYANNOTE_PIPELINE = "pyannote/speaker-diarization-community-1"
+
+
+def split_segments_by_turns(segments: list[Segment], turns: list[Turn]) -> list[Segment]:
+    """Give every word its speaker from overlapping diarization turns.
+
+    Turns may overlap in time. A word inside two speakers' turns belongs to the speaker of the
+    previous word when that speaker is one of them (a speaker keeps the floor), else to the
+    first listed. Segments split where the speaker changes, and a segment holding a word with
+    more than one active speaker is flagged ``overlap``. Speakers are renumbered by first
+    appearance. A lone word never forms its own segment.
+    """
+    ordered = sorted(turns)
+    names: dict[str, str] = {}
+    for _, _, label in ordered:
+        names.setdefault(label, f"Speaker {len(names) + 1}")
+
+    def active(moment: float) -> list[str]:
+        found = [names[label] for start, end, label in ordered if start <= moment <= end]
+        return list(dict.fromkeys(found))
+
+    def nearest(moment: float) -> str | None:
+        if not ordered:
+            return None
+        start, end, label = min(
+            ordered, key=lambda turn: 0.0 if turn[0] <= moment <= turn[1] else min(abs(turn[0] - moment), abs(turn[1] - moment))
+        )
+        return names[label]
+
+    result: list[Segment] = []
+    last_speaker: str | None = None
+    for segment in segments:
+        if not segment.words:
+            share: dict[str, float] = {}
+            for start, end, label in ordered:
+                length = min(end, segment.end) - max(start, segment.start)
+                if length > 0:
+                    share[names[label]] = share.get(names[label], 0.0) + length
+            speaker = max(share, key=share.get) if share else (nearest(segment.start) or segment.speaker)
+            result.append(Segment.from_dict({**segment.to_dict(), "speaker": speaker, "words": None}))
+            last_speaker = speaker
+            continue
+        groups: list[dict] = []
+        for word in segment.words:
+            moment = (word["start"] + word["end"]) / 2
+            candidates = active(moment)
+            if len(candidates) > 1:
+                speaker = last_speaker if last_speaker in candidates else candidates[0]
+            else:
+                speaker = candidates[0] if candidates else (last_speaker or nearest(moment) or segment.speaker)
+            last_speaker = speaker
+            if groups and groups[-1]["speaker"] == speaker:
+                groups[-1]["words"].append(word)
+            else:
+                groups.append({"speaker": speaker, "words": [word], "overlap": False})
+            if len(candidates) > 1:
+                groups[-1]["overlap"] = True
+        merged: list[dict] = []
+        for group in groups:
+            if merged and len(group["words"]) < 2:
+                merged[-1]["words"] += group["words"]
+                merged[-1]["overlap"] = merged[-1]["overlap"] or group["overlap"]
+            else:
+                merged.append(group)
+        if len(merged) > 1 and len(merged[0]["words"]) < 2:
+            merged[1]["words"] = merged[0]["words"] + merged[1]["words"]
+            merged[1]["overlap"] = merged[1]["overlap"] or merged[0]["overlap"]
+            merged.pop(0)
+        for group in merged:
+            words = group["words"]
+            result.append(
+                Segment(
+                    id=segment.id,
+                    speaker=group["speaker"],
+                    start=float(words[0]["start"]),
+                    end=float(words[-1]["end"]),
+                    text="".join(w["word"] for w in words).strip(),
+                    overlap=group["overlap"],
+                )
+            )
+    for index, segment in enumerate(result, start=1):
+        segment.id = f"seg_{index:04d}"
+    return result
+
+
 class Diarizer:
     def __init__(self, settings: Settings):
         self.settings = settings
@@ -54,6 +140,10 @@ class Diarizer:
     def assign_speakers(self, audio_path: Path, segments: list[Segment]) -> list[Segment]:
         if self.settings.engine_mode == "demo":
             return segments
+        try:
+            return self._pyannote_split(audio_path, segments)
+        except Exception as exc:
+            logger.warning("pyannote diarization unavailable, using ECAPA clustering: %s", exc)
         try:
             return self._speechbrain_cluster(audio_path, segments)
         except Exception as exc:
@@ -63,6 +153,35 @@ class Diarizer:
             # decision that both turns are the same voice.
             logger.warning("Speaker embeddings unavailable, using pause heuristic: %s", exc)
             return self._short_dialogue_fallback(segments)
+
+    def _pyannote_split(self, audio_path: Path, segments: list[Segment]) -> list[Segment]:
+        import soundfile
+        import torch
+        from pyannote.audio import Pipeline
+
+        token = self.settings.huggingface_hub_token or None
+        try:
+            pipeline = Pipeline.from_pretrained(PYANNOTE_PIPELINE, token=token)
+        except TypeError:
+            pipeline = Pipeline.from_pretrained(PYANNOTE_PIPELINE, use_auth_token=token)
+        if pipeline is None:
+            raise RuntimeError("pyannote pipeline could not be loaded (gated model terms not accepted?)")
+        if torch.cuda.is_available():
+            pipeline.to(torch.device("cuda"))
+        samples, sample_rate = soundfile.read(str(audio_path), dtype="float32", always_2d=True)
+        waveform = torch.from_numpy(samples.mean(axis=1)).unsqueeze(0)
+        output = pipeline(
+            {"waveform": waveform, "sample_rate": sample_rate},
+            num_speakers=self.settings.num_speakers,
+        )
+        annotation = getattr(output, "speaker_diarization", output)
+        turns = [
+            (float(turn.start), float(turn.end), str(label))
+            for turn, _, label in annotation.itertracks(yield_label=True)
+        ]
+        if not turns:
+            raise RuntimeError("pyannote found no speaker turns")
+        return split_segments_by_turns(segments, turns)
 
     def _speechbrain_cluster(self, audio_path: Path, segments: list[Segment]) -> list[Segment]:
         import numpy as np

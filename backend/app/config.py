@@ -48,6 +48,8 @@ class Settings(BaseSettings):
     hf_home: Path = Path("./storage/models/huggingface")
     hf_hub_disable_xet: str | None = "1"
     huggingface_hub_token: str | None = None
+    # Known speaker count for diarization; None lets pyannote decide (it under-counts overlap).
+    num_speakers: int | None = None
 
     background_mode: Literal["full_replacement", "preserve_background"] = (
         "full_replacement"
