@@ -9,8 +9,8 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends ffmpeg git curl \
     && rm -rf /var/lib/apt/lists/*
 
-COPY backend/requirements.txt /tmp/requirements.txt
-RUN pip install --no-cache-dir -r /tmp/requirements.txt
+COPY backend/requirements.txt backend/requirements-ml.txt backend/constraints.txt /tmp/
+RUN pip install --no-cache-dir -c /tmp/constraints.txt -r /tmp/requirements.txt -r /tmp/requirements-ml.txt
 
 COPY backend/app /app/app
 COPY backend/scripts /app/scripts

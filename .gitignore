@@ -1,16 +1,58 @@
+# Secrets and local config (only .env.example is tracked)
 .env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+hf_token*
+.claude/
+.codex-*/
+
+# Python
 .venv/
 venv/
 __pycache__/
 **/__pycache__/
+*.pyc
 .pytest_cache/
 .ruff_cache/
 .mypy_cache/
+
+# Node
 node_modules/
 dist/
 frontend/dist/
+frontend/.vite/
+
+# Runtime data: uploads, models, databases, logs, generated media
 storage/
-*.pyc
+*.db
+*.sqlite
+*.sqlite3
 *.log
 *.tmp
-frontend/.vite/
+
+# Generated media and scratch work
+*.mp4
+*.mov
+*.mkv
+*.webm
+*.wav
+*.mp3
+*.m4a
+*.flac
+output/
+tmp/
+brag-output*/
+.hyperframes/
+
+# Personal documents and working notes
+report/
+bug.md
+
+# OS and editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

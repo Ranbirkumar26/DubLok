@@ -1,0 +1,26 @@
+# Versions this project was tested with (Python 3.12, Windows 11, RTX 4060).
+# Use as: pip install -c backend/constraints.txt -r backend/requirements.txt -r backend/requirements-ml.txt
+# torch and torchaudio are left out on purpose: pick the wheel for your hardware (see README).
+accelerate==1.15.0
+aiofiles==25.1.0
+ctranslate2==4.8.2
+demucs==4.1.0
+fastapi==0.141.1
+faster-whisper==1.2.1
+httpx==0.28.1
+huggingface_hub==0.36.2
+librosa==1.0.0
+numpy==2.5.3
+pyannote.audio==4.0.7
+pydantic==2.13.5
+pydantic-settings==2.15.0
+python-dotenv==1.2.3
+python-multipart==0.0.32
+requests==2.34.2
+scikit-learn==1.9.1
+sentencepiece==0.2.2
+soundfile==0.14.0
+speechbrain==1.1.1
+transformers==4.46.1
+uvicorn==0.53.0
+yt-dlp==2026.8.19

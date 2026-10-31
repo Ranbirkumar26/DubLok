@@ -4,7 +4,8 @@ faster-whisper>=1.0.3
 huggingface-hub>=0.24.0
 librosa>=0.10.2
 numpy>=1.26.0
-git+https://github.com/huggingface/parler-tts.git
+pyannote.audio>=4.0.7
+git+https://github.com/huggingface/parler-tts.git@d108732cd57788ec86bc857d99a6cabd66663d68
 sacremoses>=0.1.1
 scikit-learn>=1.5.0
 sentencepiece>=0.2.0

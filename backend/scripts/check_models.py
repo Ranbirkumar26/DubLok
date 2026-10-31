@@ -15,7 +15,8 @@ PRODUCTION_PACKAGES = [
     ("torch", "Local model runtime"),
     ("torchaudio", "Diarization runtime"),
     ("soundfile", "TTS audio writing"),
-    ("speechbrain", "Speaker diarization"),
+    ("speechbrain", "Speaker diarization fallback"),
+    ("pyannote.audio", "Overlap-aware diarization"),
     ("demucs", "Background preservation"),
     ("parler_tts", "Indic Parler-TTS"),
 ]
