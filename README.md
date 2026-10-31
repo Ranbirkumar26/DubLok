@@ -80,7 +80,7 @@ Required:
 
 - Git.
 - Python 3.11 or newer (tested on 3.12).
-- Node.js 20 or newer (tested on 24) and `pnpm`.
+- Node.js 20 or newer (tested on 24) and `pnpm` 10 or newer (pnpm 9 rejects the workspace file). Install with `npm install -g pnpm@10`.
 - FFmpeg and FFprobe on `PATH`. Use a build that includes the `rubberband` filter (standard Windows "full" builds and most Linux packages do). Pitch matching uses it for formant-preserving shifts and falls back to a simpler resample method without it, which sounds worse.
 - About 15 GB of free disk for model files.
 - A free Hugging Face account (see below).
